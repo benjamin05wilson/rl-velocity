@@ -101,9 +101,12 @@ class HFRollout:
 
     name = "hf"
 
-    def __init__(self, model, tok):
+    def __init__(self, model, tok, repetition_penalty: float = 1.0):
         self.model = model
         self.tok = tok
+        # Exposed so the inherited-penalty condition can be reproduced deliberately
+        # in an A/B, rather than only avoided.
+        self.repetition_penalty = repetition_penalty
 
     def needs_weight_sync(self) -> bool:
         return False  # the trainer's own weights are what generated
@@ -128,7 +131,7 @@ class HFRollout:
             temperature=None if greedy else temperature,
             top_p=None if greedy else 1.0,
             top_k=None if greedy else 0,
-            repetition_penalty=1.0,
+            repetition_penalty=self.repetition_penalty,
             max_new_tokens=max_new,
             num_return_sequences=group_size,
             pad_token_id=tok.pad_token_id,
@@ -162,10 +165,12 @@ class VLLMRollout:
 
     name = "vllm"
 
-    def __init__(self, model_name: str, tok, gpu_frac: float, max_model_len: int, seed: int = 0):
+    def __init__(self, model_name: str, tok, gpu_frac: float, max_model_len: int, seed: int = 0,
+                 repetition_penalty: float = 1.0):
         from vllm import LLM
 
         self.tok = tok
+        self.repetition_penalty = repetition_penalty
         self.llm = LLM(
             model=model_name,
             gpu_memory_utilization=gpu_frac,
@@ -202,7 +207,7 @@ class VLLMRollout:
                 temperature=max(temperature, 0.0),
                 top_p=1.0,
                 top_k=0,               # 0 disables in vLLM
-                repetition_penalty=1.0,
+                repetition_penalty=self.repetition_penalty,
                 max_tokens=max_new,
             ),
             use_tqdm=False,

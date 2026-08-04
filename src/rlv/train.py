@@ -34,6 +34,36 @@ def build_prompt(tok, question: str) -> str:
     )
 
 
+@torch.no_grad()
+def evaluate(backend, model, tok, eval_rows, batch: int = 64) -> dict:
+    """Greedy accuracy on a held-out split.
+
+    Training reward is a moving target -- the prompts change every step and the sampling
+    is stochastic, so a rising train reward can reflect easier prompts as much as a
+    better policy. A fixed held-out set decoded greedily is the number worth comparing
+    between conditions.
+    """
+    model.gradient_checkpointing_disable()
+    model.eval()
+    if backend.needs_weight_sync():
+        backend.sync_weights(model)
+
+    n_correct = n_fmt = 0
+    for lo in range(0, len(eval_rows), batch):
+        chunk = eval_rows[lo:lo + batch]
+        prompts = [build_prompt(tok, r["question"]) for r in chunk]
+        rb = backend.generate(prompts, 1, 512, 0.0)   # temperature 0 -> argmax
+        for text, row in zip(rb.texts, chunk, strict=True):
+            g = gsm8k.grade(text, row["gold"])
+            n_correct += int(g.correct)
+            n_fmt += int(g.format_ok)
+
+    model.gradient_checkpointing_enable()
+    model.train()
+    n = len(eval_rows)
+    return {"eval_n": n, "eval_accuracy": n_correct / n, "eval_format_ok": n_fmt / n}
+
+
 def completion_logprobs(model, sequences, attention_mask, completion_mask):
     """Per-token logprobs of the sampled completions under the current policy.
 
@@ -63,6 +93,14 @@ def main() -> int:
     ap.add_argument("--normalise", default="none", choices=["none", "std"])
     ap.add_argument("--vllm-gpu-frac", type=float, default=0.32)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument(
+        "--rollout-repetition-penalty", type=float, default=1.0,
+        help="1.0 is correct. Set 1.1 to reproduce the value Qwen2.5 leaks via "
+             "generation_config.json, for the A/B on whether that bias changes learning.",
+    )
+    ap.add_argument("--eval-every", type=int, default=0, help="0 disables held-out eval")
+    ap.add_argument("--eval-prompts", type=int, default=200)
+    ap.add_argument("--train-prompts", type=int, default=2048)
     ap.add_argument("--run-name", default="grpo")
     ap.add_argument("--runs-dir", default="runs")
     args = ap.parse_args()
@@ -85,12 +123,20 @@ def main() -> int:
             gpu_frac=args.vllm_gpu_frac,
             max_model_len=args.max_new_tokens + 512,
             seed=args.seed,
+            repetition_penalty=args.rollout_repetition_penalty,
         )
     else:
-        backend = HFRollout(model, tok)
+        backend = HFRollout(model, tok, repetition_penalty=args.rollout_repetition_penalty)
 
-    data = gsm8k.load("train", limit=512)
-    print(f"loaded {len(data)} gsm8k problems, rollout backend = {backend.name}")
+    data = gsm8k.load("train", limit=args.train_prompts)
+    eval_rows = gsm8k.load("test", limit=args.eval_prompts) if args.eval_every else []
+    print(f"loaded {len(data)} train / {len(eval_rows)} eval problems, "
+          f"backend={backend.name} rollout_penalty={args.rollout_repetition_penalty}")
+
+    # Each seed sees a different prompt order, so a difference between conditions
+    # cannot be an artefact of one ordering.
+    import random
+    random.Random(args.seed).shuffle(data)
 
     rec = Recorder(args.runs_dir, args.run_name, config=vars(args))
     print(f"logging to {rec.run_dir}")
@@ -98,6 +144,14 @@ def main() -> int:
     cursor = 0
     with rec:
         for step in range(args.steps):
+            # Evaluate before the update, so step 0 records the untrained baseline
+            # every condition starts from.
+            if args.eval_every and step % args.eval_every == 0:
+                ev = evaluate(backend, model, tok, eval_rows)
+                rec.event("eval", step=step, **ev)
+                print(f"  [eval] step {step}  accuracy={ev['eval_accuracy']:.3f}  "
+                      f"format_ok={ev['eval_format_ok']:.3f}  (n={ev['eval_n']})")
+
             timer = PhaseTimer()
             MemoryProbe.start()
             acct = StepAccount(step=step)
@@ -191,6 +245,12 @@ def main() -> int:
                 f"sync={sync_w:.2f}s  gen={acct.tokens_generated / roll_w if roll_w else 0:.0f} tok/s  "
                 f"mem={acct.mem_peak_alloc_gb:.1f}GB  fmt={n_format_ok}/{total_seqs}"
             )
+
+        if args.eval_every:
+            ev = evaluate(backend, model, tok, eval_rows)
+            rec.event("eval", step=args.steps, final=True, **ev)
+            print(f"  [eval] final  accuracy={ev['eval_accuracy']:.3f}  "
+                  f"format_ok={ev['eval_format_ok']:.3f}")
 
     print(f"\nrun complete -> {rec.run_dir}/events.jsonl")
     return 0
