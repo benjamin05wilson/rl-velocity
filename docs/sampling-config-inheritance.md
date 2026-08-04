@@ -18,8 +18,25 @@ Measured on `Qwen/Qwen2.5-0.5B-Instruct`, transformers 5.14.1, vLLM 0.26.0, sm_1
 { "temperature": 0.7, "top_p": 0.8, "top_k": 20, "repetition_penalty": 1.1 }
 ```
 
-Nothing about these is unusual — most instruct checkpoints ship serving-oriented
-defaults. They are tuned for chat quality, not for being a policy you differentiate.
+These are serving defaults, tuned for chat quality — not for being a policy you
+differentiate. And they are common. Surveying 18 widely-used instruct checkpoints
+(`scripts/survey_generation_configs.py`, gated repos excluded):
+
+| field | checkpoints shipping a non-neutral value |
+|---|---|
+| `top_p` | 9 / 18 |
+| `temperature` | 9 / 18 |
+| `top_k` | 5 / 18 |
+| `repetition_penalty` | 4 / 18 |
+
+**9 of 18 ship at least one.** The `repetition_penalty` cases are the entire Qwen 2/2.5
+line (1.05–1.1) — the family most heavily used for maths RL. `top_p` and `temperature`
+matter less in practice because every RL framework sets those explicitly; `top_k` and
+`repetition_penalty` are the ones callers forget, which is precisely why they leak.
+
+One telling detail: `Qwen2.5-Math-7B-Instruct` ships a **neutral** config while the
+general-purpose `Qwen2.5-7B-Instruct` ships `repetition_penalty=1.05`. Whoever packaged
+the maths variant appears to have known this mattered.
 
 ## HF: an explicit GenerationConfig still inherits
 
@@ -75,6 +92,40 @@ looks plausible.
 On mathematical reasoning the penalty is not merely a mismatch but actively harmful:
 correct arithmetic requires re-emitting digits, and that is precisely what a repetition
 penalty suppresses. Removing it raised measured reward from 0.262 to 0.398 here.
+
+### How far from 1 is the ratio, actually
+
+`scripts/measure_importance_ratio.py` samples with `repetition_penalty=1.1` active and
+everything else neutral, then scores the *same* tokens two ways: plain `log_softmax` of
+the logits (what the trainer differentiates) and `log_softmax` after transformers' own
+`RepetitionPenaltyLogitsProcessor` (what actually drew the token). Using the library's
+processor rather than a reimplementation means the sampling distribution is exactly the
+one `generate` used. 32 sequences, 8,209 completion tokens, Qwen2.5-0.5B-Instruct:
+
+| statistic | value |
+|---|---|
+| tokens where ratio == 1 (the assumed value) | **14.1%** |
+| tokens off by more than 1% | **58.8%** |
+| tokens off by more than 10% | **37.7%** |
+| median ratio | 1.0002 |
+| p1 / p99 | 0.131 / 2.959 |
+| min / max | 0.043 / 8.680 |
+| **geometric mean** | **0.895** |
+
+The median token is barely touched; the tail is not. The arithmetic mean sits at 1.0003,
+which is exactly why it must not be quoted alone — a thin right tail offsets a fat left
+one. The geometric mean of 0.895 is the honest per-token summary: roughly a 10%
+systematic distortion, on a majority of tokens.
+
+The distortion is signed, not noisy. A repetition penalty suppresses tokens already in
+the context, so the sampler selects unseen tokens more often than the policy would;
+those tokens carry ratio < 1, dragging the geometric mean below 1.
+
+Note on scope: mean sequence-level log-weight came to −28.5 over ~257 tokens. That is
+reported for scale only, not as a correction factor — products of importance ratios
+degenerate exponentially with length regardless of this bug, which is why token-level
+ratios are the ones that matter. The claim here is deliberately narrow: **the estimator
+assumes a ratio of 1 that it does not have, on 86% of tokens.**
 
 ## Framework audit
 
