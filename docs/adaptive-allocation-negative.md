@@ -94,6 +94,57 @@ Dynamic sampling is also a shipped feature: verl (`algorithm.filter_groups`), Op
 slime. TRL declined it ([#4764](https://github.com/huggingface/trl/issues/4764), closed
 as not planned).
 
+## The idea is not just prior art — it is actively contested and losing
+
+The null measured here is not a small-scale artefact. Several papers report that
+filtering zero-variance groups **underperforms doing nothing at all**.
+
+**[RL-ZVP](https://arxiv.org/abs/2509.21880) (2025-09) is the sharpest.** At matched
+rollout budget, both filtering families lose to plain GRPO — not marginally:
+
+| Acc@8 | MATH500 | AIME24 | Olympiad |
+|---|---|---|---|
+| GRPO | 83.00 | 28.33 | 49.59 |
+| GRPO + DAPO dynamic sampling | 68.20 | 12.08 | 43.88 |
+| GRESO | 67.40 | 12.08 | 44.92 |
+
+Gradient-matched instead of rollout-matched, DAPO-DS needs 2.45–5.29x and GRESO
+1.58–3.99x more rollouts, and both still lose. RL-ZVP's own method goes the opposite
+direction — it extracts gradient *from* zero-variance groups via entropy-guided advantage
+shaping, gaining up to +8.61 accuracy.
+
+Corroborating:
+
+- **[Comparative analysis of PPO/GRPO/DAPO](https://arxiv.org/html/2512.07611v1)** (2025-12): dynamic sampling reaches a *higher surrogate objective* with no true-metric gain, and after the accuracy peak around step 75 it actively hinders improvement. Costs >25% extra per step.
+- **[P²O](https://arxiv.org/html/2603.21877v3)** (2026-05): DAPO underperforms plain GRPO by 3.2 points on DeepMath-5K.
+- **[KGPS](https://arxiv.org/html/2607.27610)** (2026-07): GRESO assumes stationary difficulty, which RL is not; "persistently high estimation error throughout training", worst early when the policy moves fastest. 28.85 vs 31.70 at identical rollout budget.
+- **[GPS](https://arxiv.org/html/2602.01970v2)** (2026-05): GRESO below the no-filtering baseline on AIME24 (31.5 vs 32.4).
+- **[DARS](https://arxiv.org/html/2508.13755v8)**: group advantage `2Nu(1-u)` peaks at u=0.5, so the optimiser already over-weights medium difficulty; filtering compounds a bias rather than correcting one. Allocating *more* to hard prompts gains +2.0 Pass@128.
+
+## The premise itself was wrong
+
+The deepest problem is not the allocator. It is the assumption this repo started from —
+that degenerate groups waste GPU-seconds proportional to their tokens.
+
+In synchronous RL, a generation step ends when its **slowest sequence** finishes.
+Generation length is heavy-tailed, so wall-clock is set by one straggler decoding at
+batch size 1 — roughly a tenth of saturated throughput — while everything else waits.
+Removing tokens from the middle of that distribution frees capacity that was not the
+bottleneck. DAPO says exactly this in §3.2 and it is the reason the paper does not
+consider its discarded rollouts expensive.
+
+Practitioner measurement agrees: [UniRL#94](https://github.com/Tencent-Hunyuan/UniRL/issues/94)
+concludes dynamic sampling is "a data-efficiency lever, not throughput". Related work
+([Beat the Long Tail](https://arxiv.org/abs/2511.13841),
+[Straggler-Aware Group Sizing](https://arxiv.org/abs/2606.02218)) confirms rollout is
+>70% of runtime and a small fraction of long generations dominates it.
+
+**So "27.7% of groups are degenerate" was never equivalent to "27.7% of GPU-seconds are
+recoverable."** The correct framing of this repo's own headline metric is that
+`wasted_token_frac` measures wasted *tokens*, and tokens do not convert to wall-clock at
+a fixed rate under straggler-bound generation. That is a correction to how the
+instrumentation was motivated on day one.
+
 ## What remains genuinely open
 
 Not the method. Possibly the evaluation:
