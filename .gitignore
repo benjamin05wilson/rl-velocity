@@ -1,0 +1,17 @@
+.venv/
+__pycache__/
+*.py[cod]
+.ruff_cache/
+.pytest_cache/
+
+# Run artifacts. The logs are the experimental record -- keep them out of git but
+# never delete them casually; a throughput claim you cannot reproduce is worthless.
+runs/
+wandb/
+*.jsonl
+
+# Model weights and caches
+models/
+.cache/
+*.safetensors
+*.bin
