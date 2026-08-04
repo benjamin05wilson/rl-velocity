@@ -47,14 +47,31 @@ point is to make the cost of a zero-advantage group visible rather than inferred
 
 | Stage | State |
 |---|---|
-| Blackwell `sm_120` toolchain verified | done — native kernels, 122 TFLOP/s bf16 |
+| Blackwell `sm_120` toolchain verified | done — native kernels, 101 TFLOP/s bf16 |
 | Instrumentation layer | done |
-| vLLM generation on `sm_120` | in progress |
-| GRPO loop end to end | not started |
-| Throughput baseline | not started |
+| vLLM generation on `sm_120` | done — 10.9k tok/s at 45% of the card |
+| GRPO loop end to end | done — naive baseline, HF `generate` |
+| Rollout/train overlap via vLLM | not started |
+| Adaptive rollout allocation | not started |
 
-Nothing here is a measured claim yet beyond the toolchain numbers. Results go in this
-table when they exist and not before.
+### First measurement
+
+Six steps of GRPO on Qwen2.5-0.5B-Instruct, 4 prompts × 8 completions, 400 max new
+tokens, single 24GB card:
+
+- **Rollout is 88–92% of step wall time**, every step, without exception.
+- Generation runs at ~800–1200 tok/s through HF `generate`. The same card does
+  **10,913 tok/s** under vLLM at 45% memory — so the dominant cost in the loop is
+  running roughly an order of magnitude below what the hardware does.
+- Degenerate groups ranged 0–100% of the batch across six steps, and wasted tokens
+  tracked it closely (0–100%).
+
+Six steps is a smoke test, not a result. The degenerate fraction is far too noisy at
+4 prompts per step to characterise, and two steps showed a reward collapse that has not
+been explained yet. What the numbers do establish is that the bottleneck is where the
+thesis expected it, and that there is a large measured gap to close.
+
+Nothing else goes in this table until it has been measured.
 
 ## Environment
 
