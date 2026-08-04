@@ -93,6 +93,39 @@ suppresses. Pinning neutral sampling raised HF reward from 0.262 to 0.398 on its
 Both backends now pin `top_k`, `top_p` and `repetition_penalty` explicitly
 (`NEUTRAL_SAMPLING` in `rollout.py`).
 
+## Negative result: training impact could not be measured here
+
+The intended headline was an A/B — identical GRPO runs with and without the inherited
+`repetition_penalty` — to show whether the biased gradient changes learning outcomes.
+It was not run, because the positive control failed first.
+
+Before comparing conditions, the *correct* configuration has to be shown to learn.
+120 steps, 8 prompts x 8 completions, held-out greedy accuracy on 200 GSM8K test problems:
+
+| learning rate | step 0 | 40 | 80 | 120 |
+|---|---|---|---|---|
+| 1e-6 | 0.500 | 0.505 | 0.465 | 0.505 |
+| 1e-5 | 0.500 | 0.440 | 0.505 | 0.510 |
+| 4e-5 | 0.500 | 0.005 | 0.000 | 0.000 |
+
+Flat at both usable rates — every movement sits inside the n=200 standard error of
+~0.035 — and catastrophic collapse at 4e-5, where the policy stops emitting parseable
+answers by step 40.
+
+**A null A/B against a baseline that does not learn is uninterpretable**, so the
+comparison was abandoned rather than run and reported. Degrading a curve that is not
+rising demonstrates nothing.
+
+Most likely causes, unresolved: Qwen2.5-0.5B may lack the headroom to improve on GSM8K
+from a 50% start; 120 steps at 64 sequences is small for RL; and the loss here is
+REINFORCE with a group baseline and no KL-to-reference term, which is defensible for a
+single inner epoch (the PPO ratio is 1, so clipping is inactive) but leaves the update
+untrusted-region. Showing training impact plausibly needs a 1.5B+ policy, which does not
+fit alongside a vLLM engine in 24GB without LoRA or an 8-bit optimiser.
+
+This is recorded rather than deleted because the alternative — quietly reporting only the
+measurements that worked — is how a repo ends up implying more than it demonstrated.
+
 ## Status
 
 | Stage | State |
