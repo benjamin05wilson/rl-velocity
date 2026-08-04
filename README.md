@@ -43,35 +43,71 @@ greps, and replays offline.
 `wasted_token_frac` are in the step schema alongside reward and KL, because the whole
 point is to make the cost of a zero-advantage group visible rather than inferred.
 
+## Results
+
+Qwen2.5-0.5B-Instruct, GSM8K, 4 prompts × 8 completions, 400 max new tokens, single
+24GB card. Both backends run the identical loss, data, seed and optimiser — only the
+rollout path differs. Regenerate with `python scripts/analyse.py hf-fixed vllm-fixed`.
+
+| | HF `generate` | vLLM | |
+|---|---|---|---|
+| step wall time | 10.34 s | 2.14 s | **4.83×** |
+| rollout device time | 9.29 s | 1.11 s | **8.40×** |
+| generation throughput | 1,076 tok/s | 8,898 tok/s | **8.27×** |
+| rollout share of step | 90% | 52% | |
+| weight sync | — | 0.010 s | |
+| peak memory | 12.3 GB | 20.4 GB | |
+
+Weight sync costs 0.010s per step and is counted inside the step, because an
+optimisation that relocates work somewhere you stopped measuring is not an
+optimisation. The Amdahl ceiling from eliminating rollout entirely was 9.9×; 4.83×
+of it is realised, and the remaining step time is now 48% non-rollout — the next
+bottleneck is the training forward/backward, not generation.
+
+### The speedup was confounded, and the check caught it
+
+The first measurement of this comparison was invalid. Verified before publishing, by
+`scripts/compare_backends.py`:
+
+| | before | after |
+|---|---|---|
+| greedy first-100-char agreement | 31% | **97%** |
+| sampled mean reward (hf vs vllm) | 0.262 vs 0.406 | 0.398 vs 0.406 |
+| significance of that gap | z = 3.51 | z = 0.18 |
+| mean completion length | 327 vs 302 | 304 vs 302 |
+
+Cause: Qwen2.5 ships `generation_config.json` with `top_k=20` and
+`repetition_penalty=1.1`. HF `generate` silently applies all of it unless each field is
+overridden individually; vLLM's `SamplingParams` defaults to neutral. Overriding only
+temperature and top_p left the two backends sampling different distributions, and the
+throughput comparison was measuring two things at once.
+
+**This is not only a benchmarking artefact.** On-policy RL requires that the
+distribution you sample from is the distribution you compute logprobs under. A
+repetition penalty applied during rollout but absent from the training forward pass
+makes them differ, so the policy gradient is computed against the wrong distribution —
+silently, with no error and a plausible-looking reward curve. On maths it is actively
+harmful: correct arithmetic means re-emitting digits, which is exactly what the penalty
+suppresses. Pinning neutral sampling raised HF reward from 0.262 to 0.398 on its own.
+
+Both backends now pin `top_k`, `top_p` and `repetition_penalty` explicitly
+(`NEUTRAL_SAMPLING` in `rollout.py`).
+
 ## Status
 
 | Stage | State |
 |---|---|
 | Blackwell `sm_120` toolchain verified | done — native kernels, 101 TFLOP/s bf16 |
 | Instrumentation layer | done |
-| vLLM generation on `sm_120` | done — 10.9k tok/s at 45% of the card |
-| GRPO loop end to end | done — naive baseline, HF `generate` |
-| Rollout/train overlap via vLLM | not started |
+| GRPO loop end to end | done |
+| vLLM rollout backend + weight sync | done — 4.83× step time, equivalence verified |
+| Degenerate-waste characterisation | not started — needs multi-seed runs |
 | Adaptive rollout allocation | not started |
 
-### First measurement
-
-Six steps of GRPO on Qwen2.5-0.5B-Instruct, 4 prompts × 8 completions, 400 max new
-tokens, single 24GB card:
-
-- **Rollout is 88–92% of step wall time**, every step, without exception.
-- Generation runs at ~800–1200 tok/s through HF `generate`. The same card does
-  **10,913 tok/s** under vLLM at 45% memory — so the dominant cost in the loop is
-  running roughly an order of magnitude below what the hardware does.
-- Degenerate groups ranged 0–100% of the batch across six steps, and wasted tokens
-  tracked it closely (0–100%).
-
-Six steps is a smoke test, not a result. The degenerate fraction is far too noisy at
-4 prompts per step to characterise, and two steps showed a reward collapse that has not
-been explained yet. What the numbers do establish is that the bottleneck is where the
-thesis expected it, and that there is a large measured gap to close.
-
-Nothing else goes in this table until it has been measured.
+Degenerate groups averaged 29–37% of the batch across these runs, but at 4 prompts per
+step that is far too noisy to characterise and no claim is made from it yet. That
+number is the premise for adaptive allocation, so it needs multi-seed runs at a larger
+batch before anything is built on top of it.
 
 ## Environment
 
