@@ -1,0 +1,11 @@
+{
+  "provenance": "synthetic fixture",
+  "description": "Hand-authored arithmetic example; never executed on a GPU. Names demonstrate the replay interface only.",
+  "config": {
+    "rollout_backend": "hf",
+    "model": "none"
+  },
+  "environment": {
+    "gpu": null
+  }
+}

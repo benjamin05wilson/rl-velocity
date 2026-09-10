@@ -1,0 +1,31 @@
+{
+  "provenance": "synthetic fixture",
+  "backend": "hf",
+  "config": {
+    "model": "none",
+    "temperature": 1
+  },
+  "prompt_ids": [
+    "fixture-p",
+    "fixture-q"
+  ],
+  "group_size": 2,
+  "greedy_texts": [
+    "alpha",
+    "beta"
+  ],
+  "greedy_tokens": [
+    [
+      1
+    ],
+    [
+      2
+    ]
+  ],
+  "sampled_rewards": [
+    0,
+    1,
+    1,
+    0
+  ]
+}

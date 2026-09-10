@@ -1,0 +1,15 @@
+{
+  "configuration_match": true,
+  "prompts_match": true,
+  "exact_text_fraction": 0.0,
+  "prefix_100_character_fraction": 0.0,
+  "exact_token_fraction": 0.0,
+  "equivalence_established": false,
+  "conclusion": "Descriptive diagnostics only; matching rewards or outputs do not establish distributional equivalence.",
+  "reward_delta_vllm_minus_hf": 0.0,
+  "paired_prompt_se": 0.0,
+  "descriptive_95_interval": [
+    0.0,
+    0.0
+  ]
+}

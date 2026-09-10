@@ -12,6 +12,7 @@ counts as zero advantage.
 
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass
 
@@ -38,6 +39,8 @@ def normalise(text: str) -> str | None:
     try:
         val = float(t)
     except ValueError:
+        return None
+    if not math.isfinite(val):
         return None
     # Integers and integral floats must compare equal: "72" == "72.0" == "72.00".
     return str(int(val)) if val == int(val) else str(val)
@@ -75,7 +78,8 @@ class Grade:
 
 def grade(completion: str, gold: str | None) -> Grade:
     pred = extract_prediction(completion)
-    fmt = bool(_BOXED.search(completion))
+    boxed = _BOXED.findall(completion)
+    fmt = bool(boxed) and normalise(boxed[-1]) is not None
     correct = pred is not None and gold is not None and pred == gold
     return Grade(
         reward=1.0 if correct else 0.0,
@@ -86,11 +90,11 @@ def grade(completion: str, gold: str | None) -> Grade:
     )
 
 
-def load(split: str = "train", limit: int | None = None) -> list[dict]:
+def load(split: str = "train", limit: int | None = None, revision: str | None = None) -> list[dict]:
     """Return [{question, gold, prompt}] with unparseable rows dropped."""
     from datasets import load_dataset
 
-    ds = load_dataset("openai/gsm8k", "main", split=split)
+    ds = load_dataset("openai/gsm8k", "main", split=split, revision=revision)
     rows: list[dict] = []
     for row in ds:
         gold = extract_gold(row["answer"])

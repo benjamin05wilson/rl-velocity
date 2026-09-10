@@ -65,7 +65,7 @@ def group_advantages(
 
     # Unbiased std is undefined for group_size == 1 and returns NaN; groups of one carry
     # no relative signal anyway, so clamp to zero advantage rather than propagating NaN.
-    if rewards.shape[1] < 2:
+    if rewards.shape[1] < 2:  # noqa: SIM108 - explain singleton handling
         std = torch.zeros_like(mean)
     else:
         std = rewards.std(dim=1, keepdim=True, unbiased=True)

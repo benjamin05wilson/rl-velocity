@@ -25,7 +25,6 @@ from __future__ import annotations
 import argparse
 
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer, RepetitionPenaltyLogitsProcessor
 
 from rlv.tasks import gsm8k
 from rlv.train import build_prompt
@@ -33,9 +32,32 @@ from rlv.train import build_prompt
 MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
 
 
+def interpretation(log_ratios):
+    if log_ratios.numel() == 0:
+        return "No completion tokens measured; no ratio conclusion available."
+    ratios = log_ratios.exp()
+    fraction = ((ratios - 1).abs() > 0.10).float().mean().item()
+    p1 = torch.quantile(ratios.float(), 0.01).item()
+    geo = log_ratios.mean().exp().item()
+    return (f"Measured {fraction:.1%} of tokens more than 10% from ratio 1; "
+            f"p1={p1:.4f}; geometric mean={geo:.4f}. "
+            "These token diagnostics alone do not establish learning impact or a correction estimator.")
+
+
 def main() -> int:
+    from transformers import (
+        AutoModelForCausalLM,
+        AutoTokenizer,
+        GenerationConfig,
+        RepetitionPenaltyLogitsProcessor,
+    )
+
+    from rlv.rollout import trim_completion
+
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", default=MODEL)
+    ap.add_argument("--model-revision", required=True)
+    ap.add_argument("--dataset-revision", required=True)
     ap.add_argument("--penalty", type=float, default=1.1, help="the value Qwen2.5 ships")
     ap.add_argument("--prompts", type=int, default=8)
     ap.add_argument("--group-size", type=int, default=4)
@@ -43,13 +65,14 @@ def main() -> int:
     args = ap.parse_args()
 
     torch.manual_seed(0)
-    tok = AutoTokenizer.from_pretrained(args.model)
+    tok = AutoTokenizer.from_pretrained(args.model, revision=args.model_revision)
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
-    model = AutoModelForCausalLM.from_pretrained(args.model, dtype=torch.bfloat16, device_map="cuda")
+    model = AutoModelForCausalLM.from_pretrained(args.model, revision=args.model_revision, dtype=torch.bfloat16, device_map="cuda")
     model.eval()
+    model.generation_config = GenerationConfig(bos_token_id=tok.bos_token_id, eos_token_id=tok.eos_token_id, pad_token_id=tok.pad_token_id)
 
-    data = gsm8k.load("train", limit=args.prompts)
+    data = gsm8k.load("train", limit=args.prompts, revision=args.dataset_revision)
     prompts = [build_prompt(tok, r["question"]) for r in data]
     enc = tok(prompts, return_tensors="pt", padding=True, padding_side="left").to(model.device)
     plen = enc.input_ids.shape[1]
@@ -69,13 +92,20 @@ def main() -> int:
             pad_token_id=tok.pad_token_id,
         )
 
+    completion_mask = torch.zeros_like(seqs, dtype=torch.bool)
+    for i, row in enumerate(seqs):
+        ids = trim_completion(row[plen:].tolist(), tok.eos_token_id, tok.pad_token_id)
+        completion_mask[i, plen:plen + len(ids)] = True
+    attention_mask = completion_mask.long()
+    attention_mask[:, :plen] = enc.attention_mask.repeat_interleave(args.group_size, dim=0)
+    position_ids = attention_mask.cumsum(-1) - 1
+    position_ids.masked_fill_(attention_mask == 0, 0)
     with torch.no_grad():
-        logits = model(seqs, attention_mask=(seqs != tok.pad_token_id).long()).logits.float()
+        logits = model(seqs, attention_mask=attention_mask, position_ids=position_ids, use_cache=False).logits.float()
 
     proc = RepetitionPenaltyLogitsProcessor(penalty=args.penalty)
 
     log_ratios: list[torch.Tensor] = []
-    per_seq: list[float] = []
     n_seq = seqs.shape[0]
     seq_logratio = torch.zeros(n_seq, device=seqs.device)
     seq_ntok = torch.zeros(n_seq, device=seqs.device)
@@ -85,7 +115,7 @@ def main() -> int:
     for t in range(plen - 1, seqs.shape[1] - 1):
         step_logits = logits[:, t, :]
         chosen = seqs[:, t + 1]
-        alive = chosen != tok.pad_token_id
+        alive = completion_mask[:, t + 1]
         if not alive.any():
             continue
 
@@ -100,6 +130,9 @@ def main() -> int:
         seq_logratio += lr
         seq_ntok += alive.float()
 
+    if not log_ratios:
+        print("No completion tokens measured")
+        return 1
     lr_all = torch.cat(log_ratios)
     ratios = lr_all.exp()
 
@@ -131,19 +164,7 @@ def main() -> int:
     print(f"  min / max        {slr.min():+.2f} / {slr.max():+.2f}")
     print(f"  mean tokens/seq  {seq_ntok[valid].mean():.0f}")
 
-    print("\ninterpretation:")
-    print("  The median token is barely affected, but the tail is not: 37% of tokens")
-    print("  deviate by more than 10%, with a p1 of 0.13. The distortion is systematic")
-    print("  and signed, not noise. A repetition penalty suppresses tokens already in")
-    print("  the context, so the sampler picks unseen tokens more often than the policy")
-    print("  would; those tokens carry ratio < 1, which is why the geometric mean sits")
-    print("  below 1 while the arithmetic mean sits at 1.")
-    print()
-    print("  The sequence-level log-weight is reported for scale, not as a correction")
-    print("  factor -- products of importance ratios degenerate exponentially with")
-    print("  length regardless, which is exactly why token-level ratios are the ones")
-    print("  that matter. The claim here is narrow: the estimator assumes a ratio of 1")
-    print("  it does not have, on a majority of tokens.")
+    print("\n" + interpretation(lr_all))
     return 0
 
 

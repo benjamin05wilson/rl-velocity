@@ -1,21 +1,7 @@
-"""Is a degenerate group predictable, or is it a coin flip?
+"""Collect repeated frozen-policy pass counts for exploratory allocation proxies.
 
-This gates the whole adaptive-allocation idea. In GRPO a prompt whose G completions all
-score identically produces zero advantage for every one of them: the tokens were
-generated, paid for in GPU-seconds, and taught the model nothing. Measured at 29-37% of
-groups in this repo's runs.
-
-Reallocating budget away from those prompts only works if degeneracy is a property of
-the *prompt* rather than a property of the *draw*. If each rollout is an independent
-coin flip, no predictor can beat random selection and the idea is dead before it is
-built. So measure that first, cheaply, before writing an allocator.
-
-Method: freeze the weights, sample the same prompts R independent times, and ask whether
-round r predicts round r+1. No training -- this isolates prompt difficulty from policy
-drift. That is also the limitation: during real training the policy moves, so
-predictability measured here is an upper bound on what an online allocator could exploit.
-
-Reports the honest trade: compute saved against informative groups lost.
+Zero-advantage tokens do not imply proportional GPU-time savings. No original
+pass-count archive or numerical result is included in the public evidence.
 """
 
 from __future__ import annotations
@@ -89,10 +75,14 @@ def main() -> int:
     for r in range(R - 1):
         for i in range(n):
             a, b = is_degen(r, i), is_degen(r + 1, i)
-            if a and b: dd += 1
-            elif a and not b: dn += 1
-            elif not a and b: nd += 1
-            else: nn += 1
+            if a and b:
+                dd += 1
+            elif a and not b:
+                dn += 1
+            elif not a and b:
+                nd += 1
+            else:
+                nn += 1
     p_d_given_d = dd / (dd + dn) if (dd + dn) else 0.0
     p_d_given_n = nd / (nd + nn) if (nd + nn) else 0.0
 
@@ -111,7 +101,8 @@ def main() -> int:
     pred_saved = pred_lost_groups = pred_skipped = 0
     for r in range(1, R):
         for i in range(n):
-            if is_degen(r - 1, i):                 # predictor says skip
+            if is_degen(r - 1, i):
+                                # predictor says skip
                 pred_skipped += 1
                 if is_degen(r, i):
                     pred_saved += tokens[r][i]     # correctly avoided waste
@@ -141,7 +132,7 @@ def main() -> int:
     print("WHAT AN ALLOCATOR COULD SAVE")
     print("=" * 66)
     print(f"  oracle ceiling (skip all degenerate)  {oracle_saved / tot_tok:.1%} of generation")
-    print(f"  1-round-history predictor:")
+    print("  1-round-history predictor:")
     print(f"    generation avoided                  {pred_saved / later_tok:.1%}")
     print(f"    informative groups wrongly dropped  {pred_lost_groups}/{informative_later} "
           f"({pred_lost_groups / informative_later:.1%})")
@@ -160,7 +151,7 @@ def main() -> int:
 
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
-    (out / "passes.json").write_text(json.dumps({"passes": passes, "tokens": tokens, "G": G}))
+    (out / "passes.json").write_text(json.dumps({"passes": passes, "tokens": tokens, "G": G}), encoding="utf-8", newline="\n")
     print(f"\nraw counts -> {out / 'passes.json'}")
     return 0
 

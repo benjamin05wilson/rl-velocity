@@ -6,7 +6,7 @@ that survives CUDA's async execution model and a log that survives a crashed run
 Everything else in the repo is downstream of these two files.
 """
 
-from rlv.instrument.clock import MemoryProbe, PhaseStats, PhaseTimer
+from rlv.instrument.clock import MemoryProbe, PhaseStats, PhaseTimer, StepTimer
 from rlv.instrument.recorder import Recorder, StepAccount, environment_fingerprint
 
 __all__ = [
@@ -15,5 +15,6 @@ __all__ = [
     "PhaseTimer",
     "Recorder",
     "StepAccount",
+    "StepTimer",
     "environment_fingerprint",
 ]
