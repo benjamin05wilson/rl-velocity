@@ -22,6 +22,7 @@ import subprocess
 import sys
 import time
 from dataclasses import asdict, dataclass, field
+from importlib import metadata
 from pathlib import Path
 from typing import Any
 
@@ -59,6 +60,18 @@ def environment_fingerprint() -> dict[str, Any]:
         "git_sha": _git_sha(),
         "git_dirty": _git_dirty(),
     }
+    fp["packages"] = {d.metadata["Name"]: d.version for d in metadata.distributions()}
+    keys = ("CUDA_HOME", "VLLM_ENABLE_V1_MULTIPROCESSING", "VLLM_WSL2_ENABLE_PIN_MEMORY",
+            "VLLM_USE_FLASHINFER_SAMPLER", "PYTORCH_CUDA_ALLOC_CONF", "CUDA_VISIBLE_DEVICES")
+    fp["runtime_settings"] = {k: os.environ.get(k) for k in keys}
+    fp["driver"] = None
+    try:
+        result = subprocess.run(["nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader"],
+                                capture_output=True, text=True, timeout=5)
+        if result.returncode == 0:
+            fp["driver"] = result.stdout.strip()
+    except (OSError, subprocess.TimeoutExpired):
+        pass
     try:
         import torch
 
@@ -78,29 +91,18 @@ def environment_fingerprint() -> dict[str, Any]:
 
 @dataclass
 class StepAccount:
-    """Per-step compute accounting.
-
-    The unusual fields are the point. Most RL logging records what the *model* did
-    (reward, loss, KL). This also records what the *hardware* did and, critically,
-    how much of that hardware time bought nothing.
-
-    In GRPO, a prompt whose G sampled completions all score identically produces a
-    zero advantage for every one of them: the tokens were generated, paid for in
-    GPU-seconds, and contributed no gradient. On a partly-trained model against a
-    maths set that is routinely a third to a half of the generation budget. Nobody
-    reports it, so nobody optimises it -- which is exactly why it is worth logging
-    from the first commit rather than bolting on once we go looking.
-    """
+    """Step timing and token accounting; zero-advantage tokens are not GPU savings."""
 
     step: int
-    wall_s: float = 0.0
+    wall_s: float | None = None
+    timing_schema: str = "synchronized_step_v2"
+    phase_host_s: dict[str, float] = field(default_factory=dict)
 
     # --- compute accounting -------------------------------------------------
-    tokens_prompt: int = 0
+    tokens_prompt: int | None = None
     tokens_generated: int = 0
     tokens_trained: int = 0
-    device_s: dict[str, float] = field(default_factory=dict)   # phase -> GPU seconds
-    idle_s: dict[str, float] = field(default_factory=dict)     # phase -> GPU starvation
+    device_s: dict[str, float | None] = field(default_factory=dict)   # current-stream event span
 
     # --- the waste signal ---------------------------------------------------
     n_groups: int = 0
@@ -111,8 +113,8 @@ class StepAccount:
     reward_mean: float = 0.0
     reward_std: float = 0.0
     advantage_abs_mean: float = 0.0
-    kl: float = 0.0
-    entropy: float = 0.0
+    kl: float | None = None
+    entropy: float | None = None
     grad_norm: float = 0.0
     loss: float = 0.0
 
@@ -130,16 +132,17 @@ class StepAccount:
 
     @property
     def generated_tokens_per_s(self) -> float:
-        gen = self.device_s.get("rollout", 0.0)
-        return self.tokens_generated / gen if gen else 0.0
+        return self.tokens_generated / self.wall_s if self.wall_s else None
 
 
 class Recorder:
     """One run, one directory, one append-only event log."""
 
     def __init__(self, root: str | Path, run_name: str, config: dict[str, Any] | None = None) -> None:
+        if not run_name or run_name in (".", "..") or Path(run_name).name != run_name or "\\" in run_name:
+            raise ValueError("run_name must be a single directory name")
         self.run_dir = Path(root) / run_name
-        self.run_dir.mkdir(parents=True, exist_ok=True)
+        self.run_dir.mkdir(parents=True, exist_ok=False)
         self.run_name = run_name
         self.t0 = time.time()
 
@@ -151,9 +154,8 @@ class Recorder:
         }
         (self.run_dir / "meta.json").write_text(json.dumps(meta, indent=2, default=str))
 
-        # Line-buffered append. Never truncate -- resuming a run must not erase
-        # the evidence from the attempt that died.
-        self._fh = open(self.run_dir / "events.jsonl", "a", buffering=1, encoding="utf-8")
+        # Exclusive create in a newly reserved directory; resume is unsupported.
+        self._fh = open(self.run_dir / "events.jsonl", "x", buffering=1, encoding="utf-8")  # noqa: SIM115 - closed by Recorder context
 
     def event(self, kind: str, **payload: Any) -> None:
         rec = {"t": round(time.time() - self.t0, 4), "kind": kind, **payload}
@@ -166,7 +168,7 @@ class Recorder:
         # self-describing when analysed by something that is not this code.
         d["degenerate_frac"] = round(acct.degenerate_frac, 4)
         d["wasted_token_frac"] = round(acct.wasted_token_frac, 4)
-        d["generated_tokens_per_s"] = round(acct.generated_tokens_per_s, 2)
+        d["generated_tokens_per_s"] = round(acct.generated_tokens_per_s, 2) if acct.generated_tokens_per_s is not None else None
         self.event("step", **d)
 
     def note(self, message: str, **payload: Any) -> None:

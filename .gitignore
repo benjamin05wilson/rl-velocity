@@ -15,3 +15,6 @@ models/
 .cache/
 *.safetensors
 *.bin
+
+# Small explicitly synthetic/public evidence is intentionally tracked.
+!evidence/**/*.jsonl

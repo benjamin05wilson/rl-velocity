@@ -1,29 +1,16 @@
-"""Phase timing that does not lie.
+"""Host phase durations and CUDA events on the current stream.
 
-Two traps this exists to avoid:
-
-1. `time.perf_counter()` around CUDA work measures kernel *launch* time, not
-   execution. Launches are async, so an unsynchronised timer reports microseconds
-   for work that takes half a second. Most homegrown RL profiling is wrong this way.
-
-2. The naive fix -- `torch.cuda.synchronize()` around every phase -- is also wrong.
-   It serialises the pipeline you are trying to measure, so the act of measuring
-   destroys the overlap you care about. Measured throughput drops and you optimise
-   against a distorted picture.
-
-The way out is CUDA events: the device timestamps itself in-stream, costing
-essentially nothing, and we only pay a sync once per step when we read the numbers
-back. Wall time and device time are both recorded, because their *divergence* is
-the signal -- a phase whose wall time exceeds its device time is a phase where the
-GPU sat idle waiting on Python, and in RL that gap is usually where the wins are.
+Event spans include stream waits; they are not SM busy time. Host/event differences
+cannot diagnose GPU idleness. A separate enclosing timer synchronizes the current
+CUDA device at both boundaries; other processes/devices are outside its scope.
 """
 
 from __future__ import annotations
 
+import time
 from collections import defaultdict
 from contextlib import contextmanager
-from dataclasses import dataclass, field
-import time
+from dataclasses import dataclass
 
 import torch
 
@@ -34,10 +21,6 @@ class PhaseStats:
     device_s: float = 0.0
     calls: int = 0
 
-    @property
-    def idle_s(self) -> float:
-        """Wall time not covered by device work -- the GPU-starvation gap."""
-        return max(0.0, self.wall_s - self.device_s)
 
 
 class PhaseTimer:
@@ -62,9 +45,11 @@ class PhaseTimer:
     def __call__(self, phase: str):
         if not self.enabled:
             t0 = time.perf_counter()
-            yield
-            self.stats[phase].wall_s += time.perf_counter() - t0
-            self.stats[phase].calls += 1
+            try:
+                yield
+            finally:
+                self.stats[phase].wall_s += time.perf_counter() - t0
+                self.stats[phase].calls += 1
             return
 
         start = torch.cuda.Event(enable_timing=True)
@@ -97,8 +82,7 @@ class PhaseTimer:
         return {
             phase: {
                 "wall_s": round(s.wall_s, 6),
-                "device_s": round(s.device_s, 6),
-                "idle_s": round(s.idle_s, 6),
+                "device_s": round(s.device_s, 6) if self.enabled else None,
                 "calls": s.calls,
             }
             for phase, s in self.stats.items()
@@ -111,14 +95,34 @@ class PhaseTimer:
         self._pending.clear()
 
 
+class StepTimer:
+    """Enclosing elapsed time including final device drain, excluding initial drain."""
+
+    def __init__(self):
+        self.started = None
+
+    def start(self):
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        self.started = time.perf_counter()
+
+    def stop(self):
+        if self.started is None:
+            raise RuntimeError("step timer has not started")
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        elapsed = time.perf_counter() - self.started
+        self.started = None
+        return elapsed
+
+
 @dataclass
 class MemoryProbe:
     """Peak memory per step. Reset each step or the peak is meaningless."""
 
     peak_alloc_gb: float = 0.0
     peak_reserved_gb: float = 0.0
-    # Reserved-but-unallocated is fragmentation. On a 24GB card that gap is
-    # frequently what stands between you and a larger batch.
+    # Difference of allocator peaks, not a direct measurement of fragmentation.
     frag_gb: float = 0.0
 
     @staticmethod

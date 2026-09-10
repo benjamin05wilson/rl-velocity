@@ -89,10 +89,14 @@ def main() -> int:
     for r in range(R - 1):
         for i in range(n):
             a, b = is_degen(r, i), is_degen(r + 1, i)
-            if a and b: dd += 1
-            elif a and not b: dn += 1
-            elif not a and b: nd += 1
-            else: nn += 1
+            if a and b:
+                dd += 1
+            elif a and not b:
+                dn += 1
+            elif not a and b:
+                nd += 1
+            else:
+                nn += 1
     p_d_given_d = dd / (dd + dn) if (dd + dn) else 0.0
     p_d_given_n = nd / (nd + nn) if (nd + nn) else 0.0
 
@@ -111,7 +115,8 @@ def main() -> int:
     pred_saved = pred_lost_groups = pred_skipped = 0
     for r in range(1, R):
         for i in range(n):
-            if is_degen(r - 1, i):                 # predictor says skip
+            if is_degen(r - 1, i):
+                                # predictor says skip
                 pred_skipped += 1
                 if is_degen(r, i):
                     pred_saved += tokens[r][i]     # correctly avoided waste
@@ -141,7 +146,7 @@ def main() -> int:
     print("WHAT AN ALLOCATOR COULD SAVE")
     print("=" * 66)
     print(f"  oracle ceiling (skip all degenerate)  {oracle_saved / tot_tok:.1%} of generation")
-    print(f"  1-round-history predictor:")
+    print("  1-round-history predictor:")
     print(f"    generation avoided                  {pred_saved / later_tok:.1%}")
     print(f"    informative groups wrongly dropped  {pred_lost_groups}/{informative_later} "
           f"({pred_lost_groups / informative_later:.1%})")

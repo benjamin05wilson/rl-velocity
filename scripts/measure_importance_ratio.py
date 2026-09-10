@@ -25,7 +25,6 @@ from __future__ import annotations
 import argparse
 
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer, RepetitionPenaltyLogitsProcessor
 
 from rlv.tasks import gsm8k
 from rlv.train import build_prompt
@@ -33,7 +32,21 @@ from rlv.train import build_prompt
 MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
 
 
+def interpretation(log_ratios):
+    if log_ratios.numel() == 0:
+        return "No completion tokens measured; no ratio conclusion available."
+    ratios = log_ratios.exp()
+    fraction = ((ratios - 1).abs() > 0.10).float().mean().item()
+    p1 = torch.quantile(ratios.float(), 0.01).item()
+    geo = log_ratios.mean().exp().item()
+    return (f"Measured {fraction:.1%} of tokens more than 10% from ratio 1; "
+            f"p1={p1:.4f}; geometric mean={geo:.4f}. "
+            "These token diagnostics alone do not establish learning impact or a correction estimator.")
+
+
 def main() -> int:
+    from transformers import AutoModelForCausalLM, AutoTokenizer, RepetitionPenaltyLogitsProcessor
+
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", default=MODEL)
     ap.add_argument("--penalty", type=float, default=1.1, help="the value Qwen2.5 ships")
@@ -75,7 +88,6 @@ def main() -> int:
     proc = RepetitionPenaltyLogitsProcessor(penalty=args.penalty)
 
     log_ratios: list[torch.Tensor] = []
-    per_seq: list[float] = []
     n_seq = seqs.shape[0]
     seq_logratio = torch.zeros(n_seq, device=seqs.device)
     seq_ntok = torch.zeros(n_seq, device=seqs.device)
@@ -100,6 +112,9 @@ def main() -> int:
         seq_logratio += lr
         seq_ntok += alive.float()
 
+    if not log_ratios:
+        print("No completion tokens measured")
+        return 1
     lr_all = torch.cat(log_ratios)
     ratios = lr_all.exp()
 
@@ -131,19 +146,7 @@ def main() -> int:
     print(f"  min / max        {slr.min():+.2f} / {slr.max():+.2f}")
     print(f"  mean tokens/seq  {seq_ntok[valid].mean():.0f}")
 
-    print("\ninterpretation:")
-    print("  The median token is barely affected, but the tail is not: 37% of tokens")
-    print("  deviate by more than 10%, with a p1 of 0.13. The distortion is systematic")
-    print("  and signed, not noise. A repetition penalty suppresses tokens already in")
-    print("  the context, so the sampler picks unseen tokens more often than the policy")
-    print("  would; those tokens carry ratio < 1, which is why the geometric mean sits")
-    print("  below 1 while the arithmetic mean sits at 1.")
-    print()
-    print("  The sequence-level log-weight is reported for scale, not as a correction")
-    print("  factor -- products of importance ratios degenerate exponentially with")
-    print("  length regardless, which is exactly why token-level ratios are the ones")
-    print("  that matter. The claim here is narrow: the estimator assumes a ratio of 1")
-    print("  it does not have, on a majority of tokens.")
+    print("\n" + interpretation(lr_all))
     return 0
 
 

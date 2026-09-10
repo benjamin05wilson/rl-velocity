@@ -11,6 +11,7 @@ Downloads only generation_config.json -- a few hundred bytes per model, no weigh
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 # Fields that alter the sampled distribution. A checkpoint setting any of these to a
 # non-neutral value hands it to HF `generate` for any field the caller omits.
@@ -62,7 +63,7 @@ def main() -> int:
     for repo in MODELS:
         try:
             path = hf_hub_download(repo, "generation_config.json")
-            cfg = json.loads(open(path).read())
+            cfg = json.loads(Path(path).read_text())
         except EntryNotFoundError:
             rows.append((repo, {}, []))  # no file at all -> nothing to inherit
             continue

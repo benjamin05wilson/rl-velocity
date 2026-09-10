@@ -1,0 +1,5 @@
+Step 0 excluded by default. tok/s denominator = same recorded wall_s column.
+Legacy rows are partial phase sums, NOT end-to-end measurements. No automatic speedup comparison.
+run | provenance | timing schema | n | recorded seconds | generated tok/s | reward
+hf-fixed | synthetic fixture | synchronized_step_v2 | 2 | 11.000 | 10.909 | 0.500
+vllm-fixed | synthetic fixture | synchronized_step_v2 | 2 | 7.000 | 17.143 | 0.500

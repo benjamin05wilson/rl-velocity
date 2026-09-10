@@ -78,8 +78,8 @@ def main() -> int:
     print("\n=== attention backends ===")
     # RL rollout throughput lives or dies on the attention path.
     try:
-        from torch.nn.attention import SDPBackend, sdpa_kernel
         import torch.nn.functional as F
+        from torch.nn.attention import SDPBackend, sdpa_kernel
 
         q = torch.randn(2, 8, 512, 64, device="cuda", dtype=torch.bfloat16)
         for backend, label in (

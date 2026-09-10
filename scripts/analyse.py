@@ -1,118 +1,94 @@
-"""Summarise runs from their event logs.
-
-Reads only runs/<name>/events.jsonl, so every number here is reconstructible from the
-on-disk record without rerunning anything. That is the point of an append-only log: a
-claim you cannot regenerate from the artefact is a claim you are asking to be believed.
-
-Step 0 is excluded from timing by default -- it absorbs allocator growth, autotuning and
-cache warmup, and including it flatters whichever backend has the slower startup.
-"""
-
+"""Standard-library replay. Never infer utilization, equivalence or Amdahl bounds."""
 from __future__ import annotations
 
 import argparse
+import html
 import json
 from pathlib import Path
 
 
-def load(run_dir: Path) -> tuple[dict, list[dict]]:
-    meta = json.loads((run_dir / "meta.json").read_text())
-    steps = []
-    for line in (run_dir / "events.jsonl").read_text().splitlines():
-        if not line.strip():
-            continue
-        rec = json.loads(line)
-        if rec.get("kind") == "step":
-            steps.append(rec)
-    return meta, steps
+def load(run_dir: Path):
+    meta = json.loads((run_dir / 'meta.json').read_text())
+    steps = [json.loads(line) for line in (run_dir / 'events.jsonl').read_text().splitlines() if line.strip()]
+    return meta, [s for s in steps if s.get('kind') == 'step']
 
 
-def mean(xs: list[float]) -> float:
-    return sum(xs) / len(xs) if xs else 0.0
+def mean(values):
+    return sum(values) / len(values) if values else None
 
 
-def summarise(run_dir: Path, skip_first: bool) -> dict | None:
+def summarise(run_dir: Path, skip_first: bool = True):
     meta, steps = load(run_dir)
-    if not steps:
-        return None
-    used = steps[1:] if skip_first and len(steps) > 1 else steps
+    # Exclude actual step zero, even in a one-step or interrupted run.
+    used = [s for s in steps if not skip_first or s['step'] != 0]
     if not used:
         return None
-
-    cfg = meta.get("config", {})
-    phases: dict[str, float] = {}
-    for s in used:
-        for phase, secs in (s.get("device_s") or {}).items():
-            phases[phase] = phases.get(phase, 0.0) + secs
-    for k in phases:
-        phases[k] /= len(used)
-
-    gen_tokens = mean([s["tokens_generated"] for s in used])
-    roll_dev = phases.get("rollout", 0.0)
-
-    return {
-        "run": run_dir.name,
-        "backend": cfg.get("rollout_backend", "?"),
-        "steps": len(used),
-        "step_s": mean([s["wall_s"] for s in used]),
-        "rollout_dev_s": roll_dev,
-        "rollout_share": roll_dev / mean([s["wall_s"] for s in used]) if used else 0.0,
-        "sync_s": phases.get("weight_sync", 0.0),
-        "gen_tok_s": gen_tokens / roll_dev if roll_dev else 0.0,
-        "degenerate_frac": mean([s["degenerate_frac"] for s in used]),
-        "wasted_token_frac": mean([s["wasted_token_frac"] for s in used]),
-        "reward": mean([s["reward_mean"] for s in used]),
-        "mem_gb": max(s["mem_peak_alloc_gb"] for s in used),
-        "gpu": meta.get("environment", {}).get("gpu", "?"),
-    }
+    schemas = {s.get('timing_schema', 'legacy_phase_sum') for s in used}
+    if len(schemas) != 1:
+        raise ValueError('mixed timing schemas in one run')
+    schema = schemas.pop()
+    walls = [s.get('wall_s') for s in used]
+    if any(v is None or v <= 0 for v in walls):
+        raise ValueError('positive wall_s required for every included step')
+    hosts = {}
+    devices = {}
+    for source, target in [('phase_host_s', hosts), ('device_s', devices)]:
+        phases = set().union(*(s.get(source, {}) for s in used))
+        for phase in phases:
+            vals = [s.get(source, {}).get(phase) for s in used]
+            target[phase] = mean(vals) if all(v is not None for v in vals) else None
+    return dict(run=run_dir.name, provenance=meta.get('provenance', 'unverified run'),
+                backend=meta.get('config', {}).get('rollout_backend', '?'), steps=len(used),
+                timing_schema=schema, step_s=mean(walls), phase_host_s=hosts, device_s=devices,
+                gen_tok_s=sum(s['tokens_generated'] for s in used) / sum(walls),
+                reward=mean([s['reward_mean'] for s in used]))
 
 
-def main() -> int:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("runs", nargs="*", default=None)
-    ap.add_argument("--runs-dir", default="runs")
-    ap.add_argument("--include-first-step", action="store_true")
+def render_svg(rows):
+    """Deterministic standalone evidence figure; separate bars avoid overlap assumptions."""
+    metrics = [(r, 'enclosing step' if r['timing_schema'] == 'synchronized_step_v2' else 'legacy phase sum', r['step_s']) for r in rows]
+    for r in rows:
+        metrics.extend((r, f'{p} host', v) for p, v in sorted(r['phase_host_s'].items()) if v is not None)
+    scale = 430 / max(v for _, _, v in metrics)
+    lines = [f'<svg xmlns="http://www.w3.org/2000/svg" width="900" height="{100 + 38 * len(metrics)}" role="img">',
+             '<title>Recorded host durations; provenance shown per run</title>',
+             '<rect width="100%" height="100%" fill="#f8fafc"/>',
+             '<g font-family="sans-serif" font-size="14" fill="#0f172a">',
+             '<text x="24" y="30">Fixture replay — synthetic values, NOT GPU benchmark evidence</text>',
+             '<text x="24" y="54">Separate host-duration bars; no utilization or additive phase claim.</text>']
+    for i, (r, name, v) in enumerate(metrics):
+        y = 88 + i * 38
+        label = html.escape(f"{r['run']}: {name}")
+        lines.extend([f'<text x="24" y="{y + 16}">{label}</text>',
+                      f'<rect x="340" y="{y}" width="{v * scale:.2f}" height="23" fill="#2563eb"/>',
+                      f'<text x="{350 + v * scale:.2f}" y="{y + 16}">{v:.2f} s</text>'])
+    return '\n'.join(lines + ['</g></svg>']) + '\n'
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument('runs', nargs='*')
+    ap.add_argument('--runs-dir', default='runs')
+    ap.add_argument('--include-first-step', action='store_true')
+    ap.add_argument('--svg', type=Path, help='fixture-only plot destination')
     args = ap.parse_args()
-
     root = Path(args.runs_dir)
-    dirs = [root / r for r in args.runs] if args.runs else sorted(
-        d for d in root.iterdir() if d.is_dir() and (d / "events.jsonl").exists()
-    )
-
+    dirs = [root / r for r in args.runs] if args.runs else sorted(d for d in root.iterdir() if (d / 'meta.json').exists())
     rows = [r for d in dirs if (r := summarise(d, not args.include_first_step))]
     if not rows:
-        print("no runs with step events found")
+        print('no steps after warmup exclusion')
         return 1
-
-    hdr = f"{'run':<16}{'backend':<9}{'n':>3}{'step_s':>9}{'rollout_s':>11}{'share':>7}{'sync_s':>8}{'tok/s':>9}{'degen':>7}{'waste':>7}{'mem_GB':>8}"
-    print(hdr)
-    print("-" * len(hdr))
+    print('Step 0 excluded by default. tok/s denominator = same recorded wall_s column.')
+    print('Legacy rows are partial phase sums, NOT end-to-end measurements. No automatic speedup comparison.')
+    print('run | provenance | timing schema | n | recorded seconds | generated tok/s | reward')
     for r in rows:
-        print(
-            f"{r['run']:<16}{r['backend']:<9}{r['steps']:>3}{r['step_s']:>9.2f}"
-            f"{r['rollout_dev_s']:>11.2f}{r['rollout_share']:>6.0%}{r['sync_s']:>8.3f}"
-            f"{r['gen_tok_s']:>9.0f}{r['degenerate_frac']:>7.0%}{r['wasted_token_frac']:>7.0%}"
-            f"{r['mem_gb']:>8.1f}"
-        )
-
-    hf = [r for r in rows if r["backend"] == "hf"]
-    vl = [r for r in rows if r["backend"] == "vllm"]
-    if hf and vl:
-        h, v = hf[-1], vl[-1]
-        print()
-        print(f"step time:      {h['step_s']:.2f}s -> {v['step_s']:.2f}s   ({h['step_s'] / v['step_s']:.2f}x)")
-        print(f"rollout device: {h['rollout_dev_s']:.2f}s -> {v['rollout_dev_s']:.2f}s   ({h['rollout_dev_s'] / v['rollout_dev_s']:.2f}x)")
-        print(f"generation:     {h['gen_tok_s']:.0f} -> {v['gen_tok_s']:.0f} tok/s   ({v['gen_tok_s'] / h['gen_tok_s']:.2f}x)")
-        print(f"rollout share:  {h['rollout_share']:.0%} -> {v['rollout_share']:.0%} of step")
-        print()
-        # The speedup is bounded by how much of the step was rollout to begin with.
-        # Stating the ceiling stops the next optimisation being aimed at the wrong phase.
-        ceiling = 1 / (1 - h["rollout_share"]) if h["rollout_share"] < 1 else float("inf")
-        print(f"Amdahl ceiling from removing rollout entirely: {ceiling:.1f}x")
-        print(f"achieved: {h['step_s'] / v['step_s']:.2f}x -- remaining step time is now "
-              f"{1 - v['rollout_share']:.0%} non-rollout")
+        print(f"{r['run']} | {r['provenance']} | {r['timing_schema']} | {r['steps']} | {r['step_s']:.3f} | {r['gen_tok_s']:.3f} | {r['reward']:.3f}")
+    if args.svg:
+        if any(r['provenance'] != 'synthetic fixture' for r in rows):
+            ap.error('--svg is reserved for the labeled synthetic fixture')
+        args.svg.write_text(render_svg(rows))
     return 0
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     raise SystemExit(main())

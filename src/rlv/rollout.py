@@ -15,22 +15,8 @@ from dataclasses import dataclass
 
 import torch
 
-
-# Both backends pin these rather than inheriting the model's generation_config.json.
-#
-# Qwen2.5-0.5B-Instruct ships temperature=0.7, top_p=0.8, top_k=20 and
-# repetition_penalty=1.1 in that file. HF `generate` applies all four unless each is
-# overridden individually; vLLM's SamplingParams defaults to top_k=0 and
-# repetition_penalty=1.0. Overriding only temperature and top_p therefore leaves the
-# two backends sampling from measurably different distributions -- 0.262 vs 0.406 mean
-# reward, z=3.51, which is more than enough to swamp any throughput comparison.
-#
-# The deeper problem is not the benchmark. On-policy RL requires that the distribution
-# you sample from is the distribution you compute logprobs under. A repetition penalty
-# applied during rollout but absent from the training forward pass makes the two differ,
-# so the policy gradient is silently computed against the wrong distribution -- and on
-# maths a repetition penalty is actively harmful, because correct arithmetic means
-# re-emitting digits the penalty is suppressing.
+# Explicit sampler settings avoid checkpoint-dependent defaults. Configuration
+# alignment alone does not establish output distribution or learning equivalence.
 NEUTRAL_SAMPLING = {"top_k": 0, "top_p": 1.0, "repetition_penalty": 1.0}
 
 
@@ -62,6 +48,10 @@ def assemble(
     a silent correctness bug: the forward pass would attend to pad tokens and score the
     completions under a context the sampler never saw.
     """
+    if not prompt_ids or any(not p for p in prompt_ids):
+        raise ValueError("each sequence needs a nonempty prompt")
+    if not (len(prompt_ids) == len(completion_ids) == len(texts) == n_prompts * group_size):
+        raise ValueError("ragged batch dimensions disagree")
     max_p = max(len(p) for p in prompt_ids)
     max_c = max(len(c) for c in completion_ids)
     total, width = len(prompt_ids), max_p + max_c
@@ -90,6 +80,20 @@ def assemble(
         texts=texts,
         lengths=lengths,
     )
+
+
+def trim_completion(tokens, eos_id, pad_id):
+    """Keep the first EOS as a sampled token, remove only subsequent padding.
+
+    Prompt padding must be removed using its attention mask, never token identity.
+    """
+    eos_ids = set(eos_id if isinstance(eos_id, (list, tuple)) else [eos_id])
+    for i, token in enumerate(tokens):
+        if token in eos_ids:
+            return tokens[:i + 1]
+        if token == pad_id:
+            return tokens[:i]
+    return tokens
 
 
 class HFRollout:
@@ -140,10 +144,9 @@ class HFRollout:
         # Strip padding back out so both backends hand `assemble` the same ragged form.
         prompt_ids, completion_ids, texts = [], [], []
         for i in range(out.shape[0]):
-            p = [t for t in out[i, :plen].tolist() if t != tok.pad_token_id]
-            c = out[i, plen:].tolist()
-            while c and c[-1] == tok.pad_token_id:
-                c.pop()
+            row = i // group_size
+            p = enc.input_ids[row][enc.attention_mask[row].bool()].tolist()
+            c = trim_completion(out[i, plen:].tolist(), tok.eos_token_id, tok.pad_token_id)
             prompt_ids.append(p or [tok.pad_token_id])
             completion_ids.append(c)
             texts.append(tok.decode(c, skip_special_tokens=True))
@@ -166,13 +169,16 @@ class VLLMRollout:
     name = "vllm"
 
     def __init__(self, model_name: str, tok, gpu_frac: float, max_model_len: int, seed: int = 0,
-                 repetition_penalty: float = 1.0):
+                 repetition_penalty: float = 1.0, revision: str | None = None):
         from vllm import LLM
 
         self.tok = tok
         self.repetition_penalty = repetition_penalty
         self.llm = LLM(
             model=model_name,
+            revision=revision,
+            tokenizer_revision=revision,
+            generation_config="vllm",
             gpu_memory_utilization=gpu_frac,
             max_model_len=max_model_len,
             dtype="bfloat16",

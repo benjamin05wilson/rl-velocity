@@ -29,7 +29,6 @@ from __future__ import annotations
 import argparse
 import heapq
 import json
-import math
 from pathlib import Path
 
 
@@ -126,10 +125,14 @@ def main() -> int:
     # Where did the budget go?
     buckets = {"skipped to g_min": 0, "reduced": 0, "unchanged": 0, "increased": 0}
     for g in alloc:
-        if g == args.g_min: buckets["skipped to g_min"] += 1
-        elif g < G: buckets["reduced"] += 1
-        elif g == G: buckets["unchanged"] += 1
-        else: buckets["increased"] += 1
+        if g == args.g_min:
+            buckets["skipped to g_min"] += 1
+        elif g < G:
+            buckets["reduced"] += 1
+        elif g == G:
+            buckets["unchanged"] += 1
+        else:
+            buckets["increased"] += 1
     print("\n" + "=" * 64)
     print("ALLOCATION SHAPE")
     print("=" * 64)
