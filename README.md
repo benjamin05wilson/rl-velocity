@@ -78,5 +78,5 @@ only with suitable hardware. It is a **dependency-resolved, unvalidated candidat
 not a reconstructed known-working environment. CUDA checks are not part of CPU CI.
 No model or GPU workload was run for this readiness pass.
 
-Licence selection is pending the owner. No licence has been added or changed; do not
-assume an open-source licence grant from the repository's public visibility.
+Source code is available under the [MIT License](LICENSE). Third-party libraries,
+model weights and datasets retain their respective licences and terms.

@@ -139,5 +139,6 @@ tensor-core utilization. Do not run it on a CPU or interpret its success as trai
 
 Original run provenance remains unavailable; historical figures stay withdrawn. Any stronger
 performance/learning claim requires new archived GPU runs, working CUDA/driver/JIT validation,
-backend sampling checks, and a successful positive control. Owner licence selection is pending;
-no licence terms were changed. There is no package release or multi-GPU/adaptive product promise.
+backend sampling checks, and a successful positive control. Source code uses the
+[MIT License](../LICENSE); third-party libraries, models and datasets retain their own terms.
+There is no package release or multi-GPU/adaptive product promise.
