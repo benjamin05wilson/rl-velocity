@@ -3,6 +3,8 @@ name = "rl-velocity"
 version = "0.1.0"
 description = "Instrumented GRPO harness for measuring where RL training compute actually goes"
 requires-python = ">=3.12"
+license = "MIT"
+license-files = ["LICENSE"]
 dependencies = []
 
 [project.optional-dependencies]
