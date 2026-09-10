@@ -1,0 +1,4 @@
+# Text artifacts and shell scripts must be byte-stable on Windows checkouts.
+* text=auto eol=lf
+*.svg text eol=lf
+*.jsonl text eol=lf

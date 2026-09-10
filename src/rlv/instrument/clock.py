@@ -120,10 +120,10 @@ class StepTimer:
 class MemoryProbe:
     """Peak memory per step. Reset each step or the peak is meaningless."""
 
-    peak_alloc_gb: float = 0.0
-    peak_reserved_gb: float = 0.0
+    peak_alloc_gb: float | None = None
+    peak_reserved_gb: float | None = None
     # Difference of allocator peaks, not a direct measurement of fragmentation.
-    frag_gb: float = 0.0
+    frag_gb: float | None = None
 
     @staticmethod
     def start() -> None:

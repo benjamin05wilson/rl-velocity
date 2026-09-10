@@ -144,13 +144,13 @@ def main() -> int:
 
     if args.backend != "report":
         res = run(args.backend, args)
-        with (out_dir / f"{args.backend}.json").open("x") as f:
+        with (out_dir / f"{args.backend}.json").open("x", encoding="utf-8", newline="\n") as f:
             json.dump(res, f)
         print(f"wrote {out_dir / f'{args.backend}.json'}")
         return 0
 
-    hf = json.loads((out_dir / "hf.json").read_text())
-    vl = json.loads((out_dir / "vllm.json").read_text())
+    hf = json.loads((out_dir / "hf.json").read_text(encoding="utf-8"))
+    vl = json.loads((out_dir / "vllm.json").read_text(encoding="utf-8"))
 
     print(json.dumps(compare(hf, vl), indent=2))
     return 0

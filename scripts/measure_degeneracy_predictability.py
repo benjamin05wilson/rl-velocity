@@ -1,21 +1,7 @@
-"""Is a degenerate group predictable, or is it a coin flip?
+"""Collect repeated frozen-policy pass counts for exploratory allocation proxies.
 
-This gates the whole adaptive-allocation idea. In GRPO a prompt whose G completions all
-score identically produces zero advantage for every one of them: the tokens were
-generated, paid for in GPU-seconds, and taught the model nothing. Measured at 29-37% of
-groups in this repo's runs.
-
-Reallocating budget away from those prompts only works if degeneracy is a property of
-the *prompt* rather than a property of the *draw*. If each rollout is an independent
-coin flip, no predictor can beat random selection and the idea is dead before it is
-built. So measure that first, cheaply, before writing an allocator.
-
-Method: freeze the weights, sample the same prompts R independent times, and ask whether
-round r predicts round r+1. No training -- this isolates prompt difficulty from policy
-drift. That is also the limitation: during real training the policy moves, so
-predictability measured here is an upper bound on what an online allocator could exploit.
-
-Reports the honest trade: compute saved against informative groups lost.
+Zero-advantage tokens do not imply proportional GPU-time savings. No original
+pass-count archive or numerical result is included in the public evidence.
 """
 
 from __future__ import annotations
@@ -165,7 +151,7 @@ def main() -> int:
 
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
-    (out / "passes.json").write_text(json.dumps({"passes": passes, "tokens": tokens, "G": G}))
+    (out / "passes.json").write_text(json.dumps({"passes": passes, "tokens": tokens, "G": G}), encoding="utf-8", newline="\n")
     print(f"\nraw counts -> {out / 'passes.json'}")
     return 0
 

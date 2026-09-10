@@ -1,15 +1,7 @@
-"""Toolchain gate for Blackwell (sm_120).
+"""Optional Blackwell sm_120-specific smoke/profiling probe.
 
-Blackwell fails in a specific, quiet way: torch imports fine, `cuda.is_available()`
-returns True, and small ops appear to work -- because the wheel was built without
-sm_120 kernels and you are silently running JIT-compiled PTX or falling off the
-tensor-core path. You find out three weeks later when throughput is a third of what
-it should be.
-
-So we check compiled arch support explicitly, and we measure achieved TFLOPS rather
-than trusting that a matmul returning correct numbers means it ran well.
-
-Exit code 0 = safe to build on. Non-zero = do not write training code yet.
+This is not a generic CUDA compatibility gate or proof of tensor-core utilization.
+It executes GPU work and must only be run intentionally on suitable hardware.
 """
 
 from __future__ import annotations
@@ -48,14 +40,13 @@ def main() -> int:
     print(f"  device: {name}")
     check("compute capability is sm_120 (Blackwell)", cap == (12, 0), f"got sm_{cap[0]}{cap[1]}")
 
-    # The load-bearing check. `get_arch_list()` is what the wheel actually shipped
-    # kernels for. If sm_120 is absent, every kernel launch is JIT-from-PTX at best.
+    # Wheel architecture reporting is a compatibility clue, not utilization evidence.
     arch_list = torch.cuda.get_arch_list()
     print(f"  compiled archs: {' '.join(arch_list)}")
     check(
         "wheel ships native sm_120 kernels",
         any(a in ("sm_120", "sm_120a") for a in arch_list),
-        on_fail="no sm_120 in arch list -- running PTX JIT, expect bad perf",
+        on_fail="no native sm_120 listed; inspect this wheel/toolchain before benchmarking",
     )
 
     print("\n=== numerics ===")
@@ -113,9 +104,8 @@ def main() -> int:
 
     tflops = (2 * n**3 * iters) / dt / 1e12
     print(f"  bf16 {n}x{n} matmul: {tflops:.1f} TFLOP/s")
-    # A mobile Blackwell on tensor cores should clear this comfortably; landing
-    # below it is the signature of a PTX-JIT or non-tensor-core path.
-    check("bf16 throughput indicates tensor-core path", tflops > 80, f"{tflops:.1f} TFLOP/s", fatal=False)
+    # Historical heuristic only: clocks/power/thermals also affect this number.
+    check("historical bf16 throughput heuristic (>80 TFLOP/s)", tflops > 80, f"{tflops:.1f} TFLOP/s", fatal=False)
 
     print("\n=== memory ===")
     free, total = torch.cuda.mem_get_info()
@@ -129,7 +119,7 @@ def main() -> int:
     if WARN:
         print(f"OK with {len(WARN)} warning(s): {', '.join(WARN)}")
     else:
-        print("OK -- toolchain is sound, safe to build on.")
+        print("OK -- selected smoke checks passed; training and sampler behavior remain unvalidated.")
     return 0
 
 

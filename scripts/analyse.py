@@ -8,8 +8,8 @@ from pathlib import Path
 
 
 def load(run_dir: Path):
-    meta = json.loads((run_dir / 'meta.json').read_text())
-    steps = [json.loads(line) for line in (run_dir / 'events.jsonl').read_text().splitlines() if line.strip()]
+    meta = json.loads((run_dir / 'meta.json').read_text(encoding="utf-8"))
+    steps = [json.loads(line) for line in (run_dir / 'events.jsonl').read_text(encoding="utf-8").splitlines() if line.strip()]
     return meta, [s for s in steps if s.get('kind') == 'step']
 
 
@@ -50,7 +50,7 @@ def render_svg(rows):
     for r in rows:
         metrics.extend((r, f'{p} host', v) for p, v in sorted(r['phase_host_s'].items()) if v is not None)
     scale = 430 / max(v for _, _, v in metrics)
-    lines = [f'<svg xmlns="http://www.w3.org/2000/svg" width="900" height="{100 + 38 * len(metrics)}" role="img">',
+    lines = [f'<svg xmlns="http://www.w3.org/2000/svg" width="900" height="{100 + 38 * len(metrics)}" viewBox="0 0 900 {100 + 38 * len(metrics)}" role="img">',
              '<title>Recorded host durations; provenance shown per run</title>',
              '<rect width="100%" height="100%" fill="#f8fafc"/>',
              '<g font-family="sans-serif" font-size="14" fill="#0f172a">',
@@ -63,6 +63,12 @@ def render_svg(rows):
                       f'<rect x="340" y="{y}" width="{v * scale:.2f}" height="23" fill="#2563eb"/>',
                       f'<text x="{350 + v * scale:.2f}" y="{y + 16}">{v:.2f} s</text>'])
     return '\n'.join(lines + ['</g></svg>']) + '\n'
+
+
+def write_svg(path, rows):
+    # Python 3.9-compatible; never use the Windows locale encoding or CRLF.
+    with path.open("w", encoding="utf-8", newline="\n") as handle:
+        handle.write(render_svg(rows))
 
 
 def main():
@@ -86,7 +92,7 @@ def main():
     if args.svg:
         if any(r['provenance'] != 'synthetic fixture' for r in rows):
             ap.error('--svg is reserved for the labeled synthetic fixture')
-        args.svg.write_text(render_svg(rows))
+        write_svg(args.svg, rows)
     return 0
 
 

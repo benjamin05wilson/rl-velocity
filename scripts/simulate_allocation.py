@@ -1,27 +1,7 @@
-"""Does variance-weighted rollout allocation beat uniform, under a fixed budget?
+"""Explore allocation proxy objectives on user-supplied pass-count archives.
 
-The measured lift (1.91x) says degeneracy is a property of the prompt, so budget can in
-principle be steered. But the obvious policy -- skip prompts predicted degenerate -- is a
-bad trade: it avoids 16% of generation while discarding 18.4% of informative groups.
-
-That policy is wrong because the decision is not binary. For a prompt with true pass
-rate p, a group of size G is informative unless every completion lands on the same side:
-
-    P(informative | p, G) = 1 - p^G - (1-p)^G
-
-Two consequences. First, shrinking G raises the chance of degeneracy rather than
-avoiding it, so "skip" and "keep" are the endpoints of a continuum that should be
-optimised over. Second, the marginal value of the (G+1)th completion,
-
-    -p^G ln p - (1-p)^G ln(1-p)
-
-is positive and decreasing in G -- the objective is concave and separable, so greedily
-handing each completion to whichever prompt gains most is optimal. No learned predictor
-is needed; only an estimate of p per prompt.
-
-Evaluated on the counts from measure_degeneracy_predictability.py. Crucially p is
-estimated on early rounds and scored on held-out later rounds, because estimating and
-evaluating on the same data would manufacture a result out of estimation noise.
+No original pass-count archive is tracked. Results are proxy objectives under fixed
+completion budgets, not measured GPU time or learning improvement.
 """
 
 from __future__ import annotations
@@ -49,6 +29,10 @@ def greedy_allocate(ps: list[float], budget: int, g_min: int, g_max: int) -> lis
     Concave separable objective, so greedy by marginal gain is optimal.
     """
     n = len(ps)
+    if not ps or g_min < 1 or g_max < g_min or not n * g_min <= budget <= n * g_max:
+        raise ValueError("infeasible allocation bounds/budget")
+    if any(not 0 <= p <= 1 for p in ps):
+        raise ValueError("probabilities must be in [0, 1]")
     alloc = [g_min] * n
     spent = g_min * n
     if spent > budget:
@@ -71,13 +55,13 @@ def expected_informative(ps: list[float], alloc: list[int]) -> float:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--data", default="runs/degeneracy/passes.json")
+    ap.add_argument("--data", required=True, help="original pass-count JSON; not included in this repo")
     ap.add_argument("--fit-rounds", type=int, default=3, help="rounds used to estimate p")
     ap.add_argument("--g-min", type=int, default=2)
     ap.add_argument("--g-max", type=int, default=32)
     args = ap.parse_args()
 
-    blob = json.loads(Path(args.data).read_text())
+    blob = json.loads(Path(args.data).read_text(encoding="utf-8"))
     passes, G = blob["passes"], blob["G"]
     R, n = len(passes), len(passes[0])
     fit_R = min(args.fit_rounds, R - 1)

@@ -1,159 +1,82 @@
-# rl-velocity
+# RL Velocity
 
-An instrumented GRPO harness for a question that is rarely measured: **where does RL
-training compute actually go, and how much of it buys no learning at all?**
+A one-card research harness for **simplified group-relative policy-gradient / REINFORCE**
+updates with interchangeable Hugging Face and vLLM rollouts, in-process weight sync,
+phase timing, and token-level sampling diagnostics. It does not implement full PPO/GRPO
+clipping or a reference-policy KL term. **No learning improvement or GPU speedup is
+established by the evidence in this repository.**
 
-## The question
+The contribution is inspectable instrumentation and correctness work, alongside documented
+failed hypotheses. Start with the [sampling investigation](docs/sampling-config-inheritance.md),
+[allocation negative result](docs/adaptive-allocation-negative.md), and
+[measurement/reproduction limits](docs/reproduction.md).
 
-In GRPO, each prompt is answered `G` times and the group's rewards are turned into
-relative advantages. When all `G` completions score identically — all correct, or all
-wrong — every advantage in that group is zero. Those tokens were still generated. They
-were still paid for in GPU-seconds. They contributed nothing to the gradient.
+## Offline demonstration — no GPU, downloads or dependencies
 
-On a partly-trained model against a maths dataset, that is routinely a third to a half
-of the generation budget, and generation is already the dominant cost in the loop. It is
-widely known and rarely quantified, because the standard logging stack records what the
-*model* did (reward, KL, loss) and not what the *hardware* did.
-
-This repo measures both, from the first commit, on one 24GB GPU.
-
-## Why one GPU is the point, not a limitation
-
-Almost all RL infrastructure work is evaluated where compute is abundant. The regime
-where it is scarce — where rollout and training must cohabit on a single card, and every
-wasted token is a token you cannot afford — is materially different and comparatively
-unexplored, because the people with clusters have no reason to care.
-
-Sample efficiency per GPU-hour is a different objective from sample efficiency per
-environment step, and it is the one that matters if you are paying for the GPU.
-
-## Design commitments
-
-**Timing that survives async CUDA.** Wrapping `perf_counter` around kernel launches
-measures nothing, and synchronising every phase to fix it destroys the overlap being
-measured. Phase timing uses CUDA events, with a single sync per step. Wall time and
-device time are both recorded — their divergence is the GPU-starvation signal, and in an
-RL loop that gap is usually where the wins are.
-
-**Append-only, flushed on write.** RL runs die hours in. A run killed at step 4000 leaves
-3999 readable steps on disk. JSONL rather than a metrics service, so the log diffs,
-greps, and replays offline.
-
-**Waste accounting as a first-class metric.** `degenerate_frac` and
-`wasted_token_frac` are in the step schema alongside reward and KL, because the whole
-point is to make the cost of a zero-advantage group visible rather than inferred.
-
-## Results
-
-Qwen2.5-0.5B-Instruct, GSM8K, 4 prompts × 8 completions, 400 max new tokens, single
-24GB card. Both backends run the identical loss, data, seed and optimiser — only the
-rollout path differs. Regenerate with `python scripts/analyse.py hf-fixed vllm-fixed`.
-
-| | HF `generate` | vLLM | |
-|---|---|---|---|
-| step wall time | 10.34 s | 2.14 s | **4.83×** |
-| rollout device time | 9.29 s | 1.11 s | **8.40×** |
-| generation throughput | 1,076 tok/s | 8,898 tok/s | **8.27×** |
-| rollout share of step | 90% | 52% | |
-| weight sync | — | 0.010 s | |
-| peak memory | 12.3 GB | 20.4 GB | |
-
-Weight sync costs 0.010s per step and is counted inside the step, because an
-optimisation that relocates work somewhere you stopped measuring is not an
-optimisation. The Amdahl ceiling from eliminating rollout entirely was 9.9×; 4.83×
-of it is realised, and the remaining step time is now 48% non-rollout — the next
-bottleneck is the training forward/backward, not generation.
-
-### The speedup was confounded, and the check caught it
-
-The first measurement of this comparison was invalid. Verified before publishing, by
-`scripts/compare_backends.py`:
-
-| | before | after |
-|---|---|---|
-| greedy first-100-char agreement | 31% | **97%** |
-| sampled mean reward (hf vs vllm) | 0.262 vs 0.406 | 0.398 vs 0.406 |
-| significance of that gap | z = 3.51 | z = 0.18 |
-| mean completion length | 327 vs 302 | 304 vs 302 |
-
-Cause: Qwen2.5 ships `generation_config.json` with `top_k=20` and
-`repetition_penalty=1.1`. HF `generate` silently applies all of it unless each field is
-overridden individually; vLLM's `SamplingParams` defaults to neutral. Overriding only
-temperature and top_p left the two backends sampling different distributions, and the
-throughput comparison was measuring two things at once.
-
-**This is not only a benchmarking artefact.** On-policy RL requires that the
-distribution you sample from is the distribution you compute logprobs under. A
-repetition penalty applied during rollout but absent from the training forward pass
-makes them differ, so the policy gradient is computed against the wrong distribution —
-silently, with no error and a plausible-looking reward curve. On maths it is actively
-harmful: correct arithmetic means re-emitting digits, which is exactly what the penalty
-suppresses. Pinning neutral sampling raised HF reward from 0.262 to 0.398 on its own.
-
-Both backends now pin `top_k`, `top_p` and `repetition_penalty` explicitly
-(`NEUTRAL_SAMPLING` in `rollout.py`).
-
-## Negative result: training impact could not be measured here
-
-The intended headline was an A/B — identical GRPO runs with and without the inherited
-`repetition_penalty` — to show whether the biased gradient changes learning outcomes.
-It was not run, because the positive control failed first.
-
-Before comparing conditions, the *correct* configuration has to be shown to learn.
-120 steps, 8 prompts x 8 completions, held-out greedy accuracy on 200 GSM8K test problems:
-
-| learning rate | step 0 | 40 | 80 | 120 |
-|---|---|---|---|---|
-| 1e-6 | 0.500 | 0.505 | 0.465 | 0.505 |
-| 1e-5 | 0.500 | 0.440 | 0.505 | 0.510 |
-| 4e-5 | 0.500 | 0.005 | 0.000 | 0.000 |
-
-Flat at both usable rates — every movement sits inside the n=200 standard error of
-~0.035 — and catastrophic collapse at 4e-5, where the policy stops emitting parseable
-answers by step 40.
-
-**A null A/B against a baseline that does not learn is uninterpretable**, so the
-comparison was abandoned rather than run and reported. Degrading a curve that is not
-rising demonstrates nothing.
-
-Most likely causes, unresolved: Qwen2.5-0.5B may lack the headroom to improve on GSM8K
-from a 50% start; 120 steps at 64 sequences is small for RL; and the loss here is
-REINFORCE with a group baseline and no KL-to-reference term, which is defensible for a
-single inner epoch (the PPO ratio is 1, so clipping is inactive) but leaves the update
-untrusted-region. Showing training impact plausibly needs a 1.5B+ policy, which does not
-fit alongside a vLLM engine in 24GB without LoRA or an 8-bit optimiser.
-
-This is recorded rather than deleted because the alternative — quietly reporting only the
-measurements that worked — is how a repo ends up implying more than it demonstrated.
-
-## Status
-
-| Stage | State |
-|---|---|
-| Blackwell `sm_120` toolchain verified | done — native kernels, 101 TFLOP/s bf16 |
-| Instrumentation layer | done |
-| GRPO loop end to end | done |
-| vLLM rollout backend + weight sync | done — 4.83× step time, equivalence verified |
-| Degenerate-waste characterisation | not started — needs multi-seed runs |
-| Adaptive rollout allocation | not started |
-
-Degenerate groups averaged 29–37% of the batch across these runs, but at 4 prompts per
-step that is far too noisy to characterise and no claim is made from it yet. That
-number is the premise for adaptive allocation, so it needs multi-seed runs at a larger
-batch before anything is built on top of it.
-
-## Environment
-
-WSL2 Ubuntu 22.04, RTX PRO 5000 Blackwell (24GB, `sm_120`), Python 3.12.
+From a fresh clone, Python 3.9+ is enough:
 
 ```bash
-uv venv --python 3.12
-uv pip install -e .
-python scripts/verify_gpu.py      # gate 1: torch really has sm_120 kernels
-python scripts/verify_vllm.py     # gate 2: vLLM generates on sm_120
+python3 scripts/analyse.py --runs-dir evidence hf-fixed vllm-fixed
+python3 scripts/compare_backends.py --backend report --out-dir evidence/comparison
 ```
 
-Both gates run before any training code, because a silently degraded stack costs weeks.
-`verify_gpu.py` checks `torch.cuda.get_arch_list()` explicitly rather than trusting
-`is_available()`, and measures achieved TFLOP/s rather than assuming a correct matmul
-took the tensor-core path.
+These replay **hand-authored synthetic fixtures**, not original runs. The first command
+reproduces [this transcript](evidence/replay.txt); the second shows identical aggregate
+rewards with completely different outputs and explicitly declines to establish equivalence.
+See the [manifest, inputs, commands and exclusions](evidence/MANIFEST.md) and
+[comparison output](evidence/comparison/report.json).
+
+![Synthetic fixture host-duration chart; not GPU benchmark evidence](evidence/phase-times.svg)
+
+Regenerate the figure with the standard library:
+
+```bash
+python3 scripts/analyse.py --runs-dir evidence hf-fixed vllm-fixed --svg evidence/phase-times.svg
+```
+
+Original benchmark, sampling and positive-control logs were not recovered. Earlier precise
+speedups, throughput figures, reward tables and importance-ratio statistics have been
+withdrawn from the public case study. Synthetic examples cannot substantiate them.
+
+## What is implemented
+
+| Component | Status and limits |
+|---|---|
+| Shared HF/vLLM rollout representation | Ragged masks, EOS retention and prompt padding covered by CPU tests; live backend parity unvalidated |
+| Training update | Temperature-scaled scoring, per-sequence token-mean loss with a global sequence denominator; tested microbatch gradient invariance |
+| Weight sync | In-process vLLM handoff present; version/hardware integration still needs a GPU run |
+| Instrumentation | Synchronized enclosing step plus host phase/current-stream CUDA-event spans; no SM utilization claim |
+| Sampling diagnostics | Explicit configuration and separate text/token/reward checks; no equivalence gate |
+| Learning positive control | Historical notes describe an unsuccessful control; no original evaluation records available |
+| Adaptive allocation | Completed historical proxy simulation investigation; not a training feature or demonstrated compute saving |
+| Offline replay / CPU CI | Tracked synthetic inputs and portable regression suite; CI definition covers Linux, Windows, macOS |
+
+Zero-advantage groups are a **token accounting** signal. Their tokens do not translate
+linearly into recoverable wall-clock time. A CUDA event measures a stream interval, not
+GPU utilization; host-minus-event time does not diagnose starvation.
+
+## CPU development
+
+Python 3.12+, no model downloads. Use a repository-local environment and cache:
+
+```bash
+UV_CACHE_DIR="$PWD/.cache/uv" uv venv --python 3.12 .venv
+UV_CACHE_DIR="$PWD/.cache/uv" uv pip install --python .venv/bin/python -c requirements/cpu-tested.txt -e '.[cpu,dev]'
+.venv/bin/python -m pytest -q
+.venv/bin/python -m ruff check src tests scripts
+```
+
+On Windows use `.venv\Scripts\python.exe`; the [CI workflow](.github/workflows/cpu.yml)
+uses an explicit CPU PyTorch wheel on Linux/Windows. [Exact locally tested CPU versions](requirements/cpu-tested.txt)
+are separate from the [GPU candidate recipe](docs/reproduction.md). The base package has
+no mandatory ML dependencies, and standard-library replay needs no package installation.
+
+## GPU execution and reuse
+
+Follow the [complete bounded GPU recipe](docs/reproduction.md#gpu-candidate-recipe)
+only with suitable hardware. It is a **dependency-resolved, unvalidated candidate**,
+not a reconstructed known-working environment. CUDA checks are not part of CPU CI.
+No model or GPU workload was run for this readiness pass.
+
+Licence selection is pending the owner. No licence has been added or changed; do not
+assume an open-source licence grant from the repository's public visibility.

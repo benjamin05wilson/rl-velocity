@@ -139,6 +139,8 @@ def main() -> int:
         ap.error("nonneutral penalty requires --allow-off-policy; this is a diagnostic, not on-policy training")
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
+    if args.rollout_backend == "vllm":
+        os.environ.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
     # Reserve before any expensive model/data load. Failed setup keeps its provenance.
     rec = Recorder(args.runs_dir, args.run_name, config=vars(args))
     try:
@@ -154,7 +156,6 @@ def main() -> int:
         if args.rollout_backend == "vllm":
             # Must be set before vLLM is imported. In-process workers are what make weight
             # sync a tensor handoff instead of an IPC problem.
-            os.environ.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
             backend = VLLMRollout(
                 args.model, tok,
                 gpu_frac=args.vllm_gpu_frac,

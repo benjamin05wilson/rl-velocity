@@ -45,10 +45,19 @@ def interpretation(log_ratios):
 
 
 def main() -> int:
-    from transformers import AutoModelForCausalLM, AutoTokenizer, RepetitionPenaltyLogitsProcessor
+    from transformers import (
+        AutoModelForCausalLM,
+        AutoTokenizer,
+        GenerationConfig,
+        RepetitionPenaltyLogitsProcessor,
+    )
+
+    from rlv.rollout import trim_completion
 
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", default=MODEL)
+    ap.add_argument("--model-revision", required=True)
+    ap.add_argument("--dataset-revision", required=True)
     ap.add_argument("--penalty", type=float, default=1.1, help="the value Qwen2.5 ships")
     ap.add_argument("--prompts", type=int, default=8)
     ap.add_argument("--group-size", type=int, default=4)
@@ -56,13 +65,14 @@ def main() -> int:
     args = ap.parse_args()
 
     torch.manual_seed(0)
-    tok = AutoTokenizer.from_pretrained(args.model)
+    tok = AutoTokenizer.from_pretrained(args.model, revision=args.model_revision)
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
-    model = AutoModelForCausalLM.from_pretrained(args.model, dtype=torch.bfloat16, device_map="cuda")
+    model = AutoModelForCausalLM.from_pretrained(args.model, revision=args.model_revision, dtype=torch.bfloat16, device_map="cuda")
     model.eval()
+    model.generation_config = GenerationConfig(bos_token_id=tok.bos_token_id, eos_token_id=tok.eos_token_id, pad_token_id=tok.pad_token_id)
 
-    data = gsm8k.load("train", limit=args.prompts)
+    data = gsm8k.load("train", limit=args.prompts, revision=args.dataset_revision)
     prompts = [build_prompt(tok, r["question"]) for r in data]
     enc = tok(prompts, return_tensors="pt", padding=True, padding_side="left").to(model.device)
     plen = enc.input_ids.shape[1]
@@ -82,8 +92,16 @@ def main() -> int:
             pad_token_id=tok.pad_token_id,
         )
 
+    completion_mask = torch.zeros_like(seqs, dtype=torch.bool)
+    for i, row in enumerate(seqs):
+        ids = trim_completion(row[plen:].tolist(), tok.eos_token_id, tok.pad_token_id)
+        completion_mask[i, plen:plen + len(ids)] = True
+    attention_mask = completion_mask.long()
+    attention_mask[:, :plen] = enc.attention_mask.repeat_interleave(args.group_size, dim=0)
+    position_ids = attention_mask.cumsum(-1) - 1
+    position_ids.masked_fill_(attention_mask == 0, 0)
     with torch.no_grad():
-        logits = model(seqs, attention_mask=(seqs != tok.pad_token_id).long()).logits.float()
+        logits = model(seqs, attention_mask=attention_mask, position_ids=position_ids, use_cache=False).logits.float()
 
     proc = RepetitionPenaltyLogitsProcessor(penalty=args.penalty)
 
@@ -97,7 +115,7 @@ def main() -> int:
     for t in range(plen - 1, seqs.shape[1] - 1):
         step_logits = logits[:, t, :]
         chosen = seqs[:, t + 1]
-        alive = chosen != tok.pad_token_id
+        alive = completion_mask[:, t + 1]
         if not alive.any():
             continue
 

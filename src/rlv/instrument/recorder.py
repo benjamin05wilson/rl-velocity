@@ -31,7 +31,7 @@ def _git_sha() -> str | None:
     try:
         out = subprocess.run(
             ["git", "rev-parse", "HEAD"],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True, text=True, timeout=5, cwd=Path(__file__).resolve().parents[3],
         )
         return out.stdout.strip() or None if out.returncode == 0 else None
     except Exception:  # noqa: BLE001
@@ -42,7 +42,7 @@ def _git_dirty() -> bool | None:
     try:
         out = subprocess.run(
             ["git", "status", "--porcelain"],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True, text=True, timeout=5, cwd=Path(__file__).resolve().parents[3],
         )
         return bool(out.stdout.strip()) if out.returncode == 0 else None
     except Exception:  # noqa: BLE001
@@ -119,8 +119,8 @@ class StepAccount:
     loss: float = 0.0
 
     # --- memory -------------------------------------------------------------
-    mem_peak_alloc_gb: float = 0.0
-    mem_frag_gb: float = 0.0
+    mem_peak_alloc_gb: float | None = None
+    mem_frag_gb: float | None = None
 
     @property
     def degenerate_frac(self) -> float:
@@ -152,10 +152,10 @@ class Recorder:
             "config": config or {},
             "environment": environment_fingerprint(),
         }
-        (self.run_dir / "meta.json").write_text(json.dumps(meta, indent=2, default=str))
+        (self.run_dir / "meta.json").write_text(json.dumps(meta, indent=2, default=str), encoding="utf-8", newline="\n")
 
         # Exclusive create in a newly reserved directory; resume is unsupported.
-        self._fh = open(self.run_dir / "events.jsonl", "x", buffering=1, encoding="utf-8")  # noqa: SIM115 - closed by Recorder context
+        self._fh = open(self.run_dir / "events.jsonl", "x", buffering=1, encoding="utf-8", newline="\n")  # noqa: SIM115 - closed by Recorder context
 
     def event(self, kind: str, **payload: Any) -> None:
         rec = {"t": round(time.time() - self.t0, 4), "kind": kind, **payload}

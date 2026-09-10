@@ -18,3 +18,5 @@ models/
 
 # Small explicitly synthetic/public evidence is intentionally tracked.
 !evidence/**/*.jsonl
+
+.venv-gpu/

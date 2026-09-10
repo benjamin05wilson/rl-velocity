@@ -63,7 +63,7 @@ def main() -> int:
     for repo in MODELS:
         try:
             path = hf_hub_download(repo, "generation_config.json")
-            cfg = json.loads(Path(path).read_text())
+            cfg = json.loads(Path(path).read_text(encoding="utf-8"))
         except EntryNotFoundError:
             rows.append((repo, {}, []))  # no file at all -> nothing to inherit
             continue

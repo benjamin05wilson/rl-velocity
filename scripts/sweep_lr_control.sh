@@ -8,16 +8,20 @@
 #
 # So before comparing conditions, find a learning rate where the correct
 # configuration measurably improves. Only then is the comparison interpretable.
-set -uo pipefail
+set -euo pipefail
 
-cd /root/rl-velocity
-source env.sh
+cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
+source ./env.sh
+mkdir -p runs/sweep-logs
+command -v timeout >/dev/null || { echo "GNU timeout is required" >&2; exit 1; }
 
 run_lr () {
   local lr="$1" name="lrctl-${2}"
-  if [ -d "runs/${name}" ]; then echo "== skip ${name}"; return 0; fi
+  if [ -d "runs/${name}" ]; then echo "Run collision: ${name}; choose a fresh name" >&2; return 1; fi
   echo "== ${name}  lr=${lr}  $(date +%H:%M:%S)"
-  timeout 3600 ./.venv/bin/python -m rlv.train \
+  timeout 3600 "$RLV_PYTHON" -m rlv.train \
+    --model-revision "$RLV_MODEL_REVISION" \
+    --dataset-revision "$RLV_DATASET_REVISION" \
     --rollout-backend vllm \
     --steps 120 \
     --prompts-per-step 8 \
@@ -27,9 +31,9 @@ run_lr () {
     --eval-every 40 \
     --eval-prompts 200 \
     --run-name "${name}" \
-    > "/root/logs_${name}.log" 2>&1
+    > "runs/sweep-logs/${name}.log" 2>&1
   echo "   done $(date +%H:%M:%S)"
-  grep '\[eval\]' "/root/logs_${name}.log"
+  grep '\[eval\]' "runs/sweep-logs/${name}.log"
 }
 
 run_lr 1e-6 "1e6"

@@ -30,7 +30,8 @@ def test_ragged_masks_and_real_pad_token():
     assert rb.lengths.tolist() == [[1, 2]]
     assert trim_completion([4, 0, 0], 0, 0) == [4, 0]
     assert trim_completion([4, 2, 0], [2, 5], 0) == [4, 2]
-    assert trim_completion([4, 0, 0], 2, 0) == [4]
+    assert trim_completion([4, 0, 0], 2, 0) == [4, 0, 0]
+    assert trim_completion([4, 0, 2, 0], 2, 0) == [4, 0, 2]
 
 
 def test_empty_completion_and_invalid_batch():
@@ -106,8 +107,8 @@ def test_record_collision_null_and_failed_status(tmp_path, monkeypatch):
     with pytest.raises(FileExistsError):
         Recorder(tmp_path, 'one')
     assert (tmp_path / 'one/meta.json').read_bytes() == before
-    events = [json.loads(line) for line in (tmp_path / 'one/events.jsonl').read_text().splitlines()]
-    assert all(events[0][key] is None for key in ['kl', 'entropy', 'tokens_prompt', 'wall_s', 'generated_tokens_per_s'])
+    events = [json.loads(line) for line in (tmp_path / 'one/events.jsonl').read_text(encoding="utf-8").splitlines()]
+    assert all(events[0][key] is None for key in ['kl', 'entropy', 'tokens_prompt', 'wall_s', 'generated_tokens_per_s', 'mem_peak_alloc_gb', 'mem_frag_gb'])
     assert events[-1]['status'] == 'failed'
     with pytest.raises(ValueError):
         Recorder(tmp_path, '../escape')
@@ -174,3 +175,93 @@ def test_neutral_ratio_has_neutral_computed_diagnostic():
     result = diagnostic(torch.zeros(8))
     assert '0.0%' in result and 'p1=1.0000' in result and 'mean=1.0000' in result
     assert '37%' not in result
+
+
+def test_hf_adapter_uses_attention_not_token_identity(monkeypatch):
+    import sys
+
+    from rlv.rollout import HFRollout
+
+    monkeypatch.setitem(sys.modules, 'transformers', SimpleNamespace(GenerationConfig=lambda **kw: kw))
+
+    class Encoding(dict):
+        def __getattr__(self, key):
+            return self[key]
+
+        def to(self, device):
+            return self
+
+    class Tokenizer:
+        pad_token_id = eos_token_id = 0
+        bos_token_id = 9
+
+        def __call__(self, *args, **kwargs):
+            return Encoding(input_ids=torch.tensor([[9, 0], [0, 3]]), attention_mask=torch.tensor([[1, 1], [0, 1]]))
+
+        def decode(self, ids, **kwargs):
+            return str(ids)
+
+    class Model:
+        device = 'cpu'
+        training = False
+        is_gradient_checkpointing = False
+
+        def generate(self, **kw):
+            assert kw['top_k'] == 0 and kw['repetition_penalty'] == 1
+            assert kw['temperature'] == 0.5
+            return torch.tensor([[9, 0, 4, 0, 0], [0, 3, 2, 2, 0]])
+
+    model = Model()
+    backend = HFRollout(model, Tokenizer())
+    result = backend.generate(['p', 'q'], 1, 3, 0.5)
+    assert result.attention_mask.tolist() == [[1, 1, 1, 1, 0], [0, 1, 1, 1, 1]]
+    assert result.lengths.tolist() == [[2], [3]]
+    assert result.sequences[0, 1] == 0  # a genuine prompt EOS survives
+    assert model.generation_config == {'bos_token_id': 9, 'eos_token_id': 0, 'pad_token_id': 0}
+
+
+def test_checked_in_replay_is_reproducible():
+    import subprocess
+    import sys
+    analyse = script('analyse')
+    rows = [analyse.summarise(ROOT / 'evidence' / name) for name in ['hf-fixed', 'vllm-fixed']]
+    assert analyse.render_svg(rows) == (ROOT / 'evidence/phase-times.svg').read_text(encoding="utf-8")
+    output = subprocess.check_output([sys.executable, str(ROOT / 'scripts/analyse.py'), '--runs-dir', str(ROOT / 'evidence'), 'hf-fixed', 'vllm-fixed'], text=True)
+    assert output == (ROOT / 'evidence/replay.txt').read_text(encoding="utf-8")
+    compare = script('compare_backends')
+    data = [json.loads((ROOT / 'evidence/comparison' / f'{name}.json').read_text(encoding="utf-8")) for name in ['hf', 'vllm']]
+    assert compare.compare(*data) == json.loads((ROOT / 'evidence/comparison/report.json').read_text(encoding="utf-8"))
+
+
+def test_svg_writer_explicit_utf8_and_lf(tmp_path, monkeypatch):
+    analyse = script('analyse')
+    rows = [analyse.summarise(ROOT / 'evidence/hf-fixed')]
+    original_open = Path.open
+    seen = []
+
+    def encoding_checked_open(self, mode='r', *args, **kwargs):
+        if mode == 'w':
+            seen.append((kwargs.get('encoding'), kwargs.get('newline')))
+        return original_open(self, mode, *args, **kwargs)
+
+    monkeypatch.setattr(Path, 'open', encoding_checked_open)
+    output = tmp_path / 'chart.svg'
+    analyse.write_svg(output, rows)
+    data = output.read_bytes()
+    assert seen == [('utf-8', '\n')]
+    assert '—'.encode() in data
+    assert b'\r\n' not in data
+    assert data == analyse.render_svg(rows).encode('utf-8')
+
+
+def test_allocation_budget_and_proxy_optimum():
+    import itertools
+    allocation = script('simulate_allocation')
+    ps = [0.1, 0.5, 0.9]
+    got = allocation.greedy_allocate(ps, 8, 1, 4)
+    assert sum(got) == 8
+    brute = max(allocation.expected_informative(ps, list(gs)) for gs in itertools.product(range(1, 5), repeat=3) if sum(gs) == 8)
+    assert allocation.expected_informative(ps, got) == pytest.approx(brute)
+    for budget in [0, 13]:
+        with pytest.raises(ValueError):
+            allocation.greedy_allocate(ps, budget, 1, 4)

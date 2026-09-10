@@ -1,0 +1,13 @@
+{
+  "status": "Metadata resolved 2026-09-10; not historical run revisions; no model/data execution performed",
+  "model": {
+    "id": "Qwen/Qwen2.5-0.5B-Instruct",
+    "revision": "7ae557604adf67be50417f59c2c2f167def9a775",
+    "source": "https://huggingface.co/api/models/Qwen/Qwen2.5-0.5B-Instruct"
+  },
+  "dataset": {
+    "id": "openai/gsm8k",
+    "revision": "740312add88f781978c0658806c59bc2815b9866",
+    "source": "https://huggingface.co/api/datasets/openai/gsm8k"
+  }
+}

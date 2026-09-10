@@ -83,16 +83,15 @@ def assemble(
 
 
 def trim_completion(tokens, eos_id, pad_id):
-    """Keep the first EOS as a sampled token, remove only subsequent padding.
+    """Keep the first EOS and remove its generation padding suffix.
 
-    Prompt padding must be removed using its attention mask, never token identity.
+    A PAD token before EOS can itself be sampled; retain it. Without EOS all
+    generated positions are real. Prompt padding uses the input attention mask.
     """
     eos_ids = set(eos_id if isinstance(eos_id, (list, tuple)) else [eos_id])
     for i, token in enumerate(tokens):
         if token in eos_ids:
             return tokens[:i + 1]
-        if token == pad_id:
-            return tokens[:i]
     return tokens
 
 
@@ -106,8 +105,17 @@ class HFRollout:
     name = "hf"
 
     def __init__(self, model, tok, repetition_penalty: float = 1.0):
+        from transformers import GenerationConfig
+
         self.model = model
         self.tok = tok
+        # Replace checkpoint generation defaults as well as passing explicit knobs.
+        # This covers inherited processors beyond top-k/top-p/repetition penalty.
+        model.generation_config = GenerationConfig(
+            bos_token_id=tok.bos_token_id,
+            eos_token_id=tok.eos_token_id,
+            pad_token_id=tok.pad_token_id,
+        )
         # Exposed so the inherited-penalty condition can be reproduced deliberately
         # in an A/B, rather than only avoided.
         self.repetition_penalty = repetition_penalty
@@ -129,9 +137,7 @@ class HFRollout:
         out = model.generate(
             **enc,
             do_sample=not greedy,
-            # Every sampling parameter is pinned explicitly. `generate` otherwise
-            # inherits the model's generation_config.json, and Qwen2.5 ships
-            # top_k=20 / repetition_penalty=1.1 there. See NEUTRAL_SAMPLING below.
+            # Start from the neutral config installed above and override the knobs.
             temperature=None if greedy else temperature,
             top_p=None if greedy else 1.0,
             top_k=None if greedy else 0,
